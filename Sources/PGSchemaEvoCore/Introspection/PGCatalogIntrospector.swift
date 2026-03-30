@@ -113,9 +113,12 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
                 s.increment::bigint,
                 s.minimum_value::bigint,
                 s.maximum_value::bigint,
-                s.cache_size::bigint,
-                s.cycle_option
+                s.cycle_option,
+                pg_catalog.pg_sequence.seqcache
             FROM information_schema.sequences s
+            JOIN pg_catalog.pg_class c ON c.relname = s.sequence_name
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace AND n.nspname = s.sequence_schema
+            JOIN pg_catalog.pg_sequence ON pg_catalog.pg_sequence.seqrelid = c.oid
             WHERE s.sequence_schema = \(schema)
               AND s.sequence_name = \(id.name)
             """
@@ -128,8 +131,8 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
             let increment = try randomAccess[2].decode(Int64.self)
             let minValue = try randomAccess[3].decode(Int64.self)
             let maxValue = try randomAccess[4].decode(Int64.self)
-            let cacheSize = try randomAccess[5].decode(Int64.self)
-            let cycleOption = try randomAccess[6].decode(String.self)
+            let cycleOption = try randomAccess[5].decode(String.self)
+            let cacheSize = try randomAccess[6].decode(Int64.self)
 
             // Check if owned by a column
             let ownedBy = try await querySequenceOwner(schema: schema, name: id.name)
