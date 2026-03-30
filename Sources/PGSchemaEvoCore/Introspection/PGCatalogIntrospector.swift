@@ -11,6 +11,8 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
         self.logger = logger
     }
 
+    // MARK: - Table
+
     public func describeTable(_ id: ObjectIdentifier) async throws -> TableMetadata {
         guard let schema = id.schema else {
             throw PGSchemaEvoError.invalidObjectSpec("Table requires a schema: \(id)")
@@ -36,6 +38,332 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
         )
     }
 
+    // MARK: - View
+
+    public func describeView(_ id: ObjectIdentifier) async throws -> ViewMetadata {
+        guard let schema = id.schema else {
+            throw PGSchemaEvoError.invalidObjectSpec("View requires a schema: \(id)")
+        }
+
+        let query: PostgresQuery = """
+            SELECT pg_catalog.pg_get_viewdef(c.oid, true) AS definition
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = \(schema)
+              AND c.relname = \(id.name)
+              AND c.relkind = 'v'
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        var definition: String?
+        for try await row in rows {
+            definition = try row.decode(String.self)
+        }
+
+        guard let def = definition else {
+            throw PGSchemaEvoError.objectNotFound(id)
+        }
+
+        let columns = try await queryColumns(schema: schema, name: id.name)
+        return ViewMetadata(id: id, definition: def, columns: columns)
+    }
+
+    // MARK: - Materialized View
+
+    public func describeMaterializedView(_ id: ObjectIdentifier) async throws -> MaterializedViewMetadata {
+        guard let schema = id.schema else {
+            throw PGSchemaEvoError.invalidObjectSpec("Materialized view requires a schema: \(id)")
+        }
+
+        let query: PostgresQuery = """
+            SELECT pg_catalog.pg_get_viewdef(c.oid, true) AS definition
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = \(schema)
+              AND c.relname = \(id.name)
+              AND c.relkind = 'm'
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        var definition: String?
+        for try await row in rows {
+            definition = try row.decode(String.self)
+        }
+
+        guard let def = definition else {
+            throw PGSchemaEvoError.objectNotFound(id)
+        }
+
+        let columns = try await queryColumns(schema: schema, name: id.name)
+        let indexes = try await queryIndexes(schema: schema, name: id.name)
+        return MaterializedViewMetadata(id: id, definition: def, columns: columns, indexes: indexes)
+    }
+
+    // MARK: - Sequence
+
+    public func describeSequence(_ id: ObjectIdentifier) async throws -> SequenceMetadata {
+        guard let schema = id.schema else {
+            throw PGSchemaEvoError.invalidObjectSpec("Sequence requires a schema: \(id)")
+        }
+
+        let query: PostgresQuery = """
+            SELECT
+                s.data_type,
+                s.start_value::bigint,
+                s.increment::bigint,
+                s.minimum_value::bigint,
+                s.maximum_value::bigint,
+                s.cache_size::bigint,
+                s.cycle_option
+            FROM information_schema.sequences s
+            WHERE s.sequence_schema = \(schema)
+              AND s.sequence_name = \(id.name)
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        for try await row in rows {
+            let randomAccess = row.makeRandomAccess()
+            let dataType = try randomAccess[0].decode(String.self)
+            let startValue = try randomAccess[1].decode(Int64.self)
+            let increment = try randomAccess[2].decode(Int64.self)
+            let minValue = try randomAccess[3].decode(Int64.self)
+            let maxValue = try randomAccess[4].decode(Int64.self)
+            let cacheSize = try randomAccess[5].decode(Int64.self)
+            let cycleOption = try randomAccess[6].decode(String.self)
+
+            // Check if owned by a column
+            let ownedBy = try await querySequenceOwner(schema: schema, name: id.name)
+
+            return SequenceMetadata(
+                id: id,
+                dataType: dataType,
+                startValue: startValue,
+                increment: increment,
+                minValue: minValue,
+                maxValue: maxValue,
+                cacheSize: cacheSize,
+                isCycled: cycleOption == "YES",
+                ownedByColumn: ownedBy
+            )
+        }
+
+        throw PGSchemaEvoError.objectNotFound(id)
+    }
+
+    private func querySequenceOwner(schema: String, name: String) async throws -> String? {
+        let query: PostgresQuery = """
+            SELECT
+                ns.nspname || '.' || cl.relname || '.' || a.attname AS owned_by
+            FROM pg_catalog.pg_class seq
+            JOIN pg_catalog.pg_namespace sn ON sn.oid = seq.relnamespace
+            JOIN pg_catalog.pg_depend d ON d.objid = seq.oid AND d.deptype = 'a'
+            JOIN pg_catalog.pg_class cl ON cl.oid = d.refobjid
+            JOIN pg_catalog.pg_namespace ns ON ns.oid = cl.relnamespace
+            JOIN pg_catalog.pg_attribute a ON a.attrelid = cl.oid AND a.attnum = d.refobjsubid
+            WHERE sn.nspname = \(schema) AND seq.relname = \(name) AND seq.relkind = 'S'
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        for try await row in rows {
+            return try row.decode(String.self)
+        }
+        return nil
+    }
+
+    // MARK: - Enum
+
+    public func describeEnum(_ id: ObjectIdentifier) async throws -> EnumMetadata {
+        guard let schema = id.schema else {
+            throw PGSchemaEvoError.invalidObjectSpec("Enum requires a schema: \(id)")
+        }
+
+        let query: PostgresQuery = """
+            SELECT e.enumlabel
+            FROM pg_catalog.pg_enum e
+            JOIN pg_catalog.pg_type t ON t.oid = e.enumtypid
+            JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+            WHERE n.nspname = \(schema)
+              AND t.typname = \(id.name)
+            ORDER BY e.enumsortorder
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        var labels: [String] = []
+        for try await row in rows {
+            let label = try row.decode(String.self)
+            labels.append(label)
+        }
+
+        guard !labels.isEmpty else {
+            throw PGSchemaEvoError.objectNotFound(id)
+        }
+
+        return EnumMetadata(id: id, labels: labels)
+    }
+
+    // MARK: - Function / Procedure
+
+    public func describeFunction(_ id: ObjectIdentifier) async throws -> FunctionMetadata {
+        guard let schema = id.schema else {
+            throw PGSchemaEvoError.invalidObjectSpec("Function requires a schema: \(id)")
+        }
+
+        let kind: String
+        switch id.type {
+        case .procedure: kind = "p"
+        default: kind = "f"
+        }
+
+        let query: PostgresQuery = """
+            SELECT
+                pg_catalog.pg_get_functiondef(p.oid) AS definition,
+                l.lanname AS language,
+                pg_catalog.pg_get_function_result(p.oid) AS return_type,
+                p.proisstrict AS is_strict,
+                p.provolatile AS volatility,
+                p.prosecdef AS is_security_definer,
+                pg_catalog.pg_get_function_identity_arguments(p.oid) AS arg_signature
+            FROM pg_catalog.pg_proc p
+            JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+            JOIN pg_catalog.pg_language l ON l.oid = p.prolang
+            WHERE n.nspname = \(schema)
+              AND p.proname = \(id.name)
+              AND p.prokind = \(kind)
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        for try await row in rows {
+            let randomAccess = row.makeRandomAccess()
+            let definition = try randomAccess[0].decode(String.self)
+            let language = try randomAccess[1].decode(String.self)
+            let returnType = try randomAccess[2].decode(String?.self)
+            let isStrict = try randomAccess[3].decode(Bool.self)
+            let volatilityChar = try randomAccess[4].decode(String.self)
+            let isSecurityDefiner = try randomAccess[5].decode(Bool.self)
+            let argSignature = try randomAccess[6].decode(String.self)
+
+            let volatility: String
+            switch volatilityChar {
+            case "i": volatility = "IMMUTABLE"
+            case "s": volatility = "STABLE"
+            default: volatility = "VOLATILE"
+            }
+
+            return FunctionMetadata(
+                id: id,
+                definition: definition,
+                language: language,
+                returnType: returnType,
+                isStrict: isStrict,
+                volatility: volatility,
+                isSecurityDefiner: isSecurityDefiner,
+                argumentSignature: argSignature
+            )
+        }
+
+        throw PGSchemaEvoError.objectNotFound(id)
+    }
+
+    // MARK: - Schema
+
+    public func describeSchema(_ id: ObjectIdentifier) async throws -> SchemaMetadata {
+        let query: PostgresQuery = """
+            SELECT r.rolname AS owner
+            FROM pg_catalog.pg_namespace n
+            JOIN pg_catalog.pg_roles r ON r.oid = n.nspowner
+            WHERE n.nspname = \(id.name)
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        for try await row in rows {
+            let owner = try row.decode(String.self)
+            return SchemaMetadata(id: id, owner: owner)
+        }
+
+        throw PGSchemaEvoError.objectNotFound(id)
+    }
+
+    // MARK: - Role
+
+    public func describeRole(_ id: ObjectIdentifier) async throws -> RoleMetadata {
+        let query: PostgresQuery = """
+            SELECT
+                r.rolcanlogin,
+                r.rolsuper,
+                r.rolcreatedb,
+                r.rolcreaterole,
+                r.rolconnlimit
+            FROM pg_catalog.pg_roles r
+            WHERE r.rolname = \(id.name)
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        for try await row in rows {
+            let randomAccess = row.makeRandomAccess()
+            let canLogin = try randomAccess[0].decode(Bool.self)
+            let isSuperuser = try randomAccess[1].decode(Bool.self)
+            let canCreateDB = try randomAccess[2].decode(Bool.self)
+            let canCreateRole = try randomAccess[3].decode(Bool.self)
+            let connLimit = try randomAccess[4].decode(Int.self)
+
+            // Get role memberships
+            let memberOf = try await queryRoleMembership(roleName: id.name)
+
+            return RoleMetadata(
+                id: id,
+                canLogin: canLogin,
+                isSuperuser: isSuperuser,
+                canCreateDB: canCreateDB,
+                canCreateRole: canCreateRole,
+                connectionLimit: connLimit,
+                memberOf: memberOf
+            )
+        }
+
+        throw PGSchemaEvoError.objectNotFound(id)
+    }
+
+    private func queryRoleMembership(roleName: String) async throws -> [String] {
+        let query: PostgresQuery = """
+            SELECT r.rolname
+            FROM pg_catalog.pg_auth_members m
+            JOIN pg_catalog.pg_roles r ON r.oid = m.roleid
+            JOIN pg_catalog.pg_roles mr ON mr.oid = m.member
+            WHERE mr.rolname = \(roleName)
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        var roles: [String] = []
+        for try await row in rows {
+            let role = try row.decode(String.self)
+            roles.append(role)
+        }
+        return roles
+    }
+
+    // MARK: - Extension
+
+    public func describeExtension(_ id: ObjectIdentifier) async throws -> ExtensionMetadata {
+        let query: PostgresQuery = """
+            SELECT
+                e.extversion,
+                n.nspname AS schema_name
+            FROM pg_catalog.pg_extension e
+            JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+            WHERE e.extname = \(id.name)
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        for try await row in rows {
+            let (version, schemaName) = try row.decode((String, String).self)
+            return ExtensionMetadata(id: id, version: version, installedSchema: schemaName)
+        }
+
+        throw PGSchemaEvoError.objectNotFound(id)
+    }
+
+    // MARK: - Relation Size
+
     public func relationSize(_ id: ObjectIdentifier) async throws -> Int? {
         guard let schema = id.schema else { return nil }
 
@@ -54,48 +382,50 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
         return nil
     }
 
+    // MARK: - List Objects
+
     public func listObjects(schema: String?, types: [ObjectType]?) async throws -> [ObjectIdentifier] {
         var results: [ObjectIdentifier] = []
 
-        let targetTypes = types ?? [.table]
+        let targetTypes = types ?? ObjectType.allCases
 
         for type in targetTypes {
             switch type {
             case .table:
-                let query: PostgresQuery
-                if let schema {
-                    query = """
-                        SELECT n.nspname, c.relname
-                        FROM pg_catalog.pg_class c
-                        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-                        WHERE c.relkind = 'r'
-                          AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-                          AND n.nspname = \(schema)
-                        ORDER BY n.nspname, c.relname
-                        """
-                } else {
-                    query = """
-                        SELECT n.nspname, c.relname
-                        FROM pg_catalog.pg_class c
-                        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-                        WHERE c.relkind = 'r'
-                          AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-                        ORDER BY n.nspname, c.relname
-                        """
-                }
-
-                let rows = try await connection.query(query, logger: logger)
-                for try await row in rows {
-                    let (schemaName, tableName) = try row.decode((String, String).self)
-                    results.append(ObjectIdentifier(type: .table, schema: schemaName, name: tableName))
-                }
-            default:
-                logger.warning("Listing not yet implemented for type: \(type.displayName)")
+                try await results.append(contentsOf: listRelations(schema: schema, relkind: "r", type: .table))
+            case .view:
+                try await results.append(contentsOf: listRelations(schema: schema, relkind: "v", type: .view))
+            case .materializedView:
+                try await results.append(contentsOf: listRelations(schema: schema, relkind: "m", type: .materializedView))
+            case .sequence:
+                try await results.append(contentsOf: listRelations(schema: schema, relkind: "S", type: .sequence))
+            case .enum:
+                try await results.append(contentsOf: listEnums(schema: schema))
+            case .function:
+                try await results.append(contentsOf: listProcedures(schema: schema, kind: "f", type: .function))
+            case .procedure:
+                try await results.append(contentsOf: listProcedures(schema: schema, kind: "p", type: .procedure))
+            case .aggregate:
+                try await results.append(contentsOf: listProcedures(schema: schema, kind: "a", type: .aggregate))
+            case .schema:
+                try await results.append(contentsOf: listSchemas())
+            case .role:
+                try await results.append(contentsOf: listRoles())
+            case .extension:
+                try await results.append(contentsOf: listExtensions())
+            case .foreignTable:
+                try await results.append(contentsOf: listRelations(schema: schema, relkind: "f", type: .foreignTable))
+            case .foreignDataWrapper:
+                try await results.append(contentsOf: listForeignDataWrappers())
+            case .operator, .compositeType:
+                logger.debug("Listing not yet implemented for type: \(type.displayName)")
             }
         }
 
         return results
     }
+
+    // MARK: - Permissions
 
     public func permissions(for id: ObjectIdentifier) async throws -> [PermissionGrant] {
         guard let schema = id.schema else { return [] }
@@ -122,7 +452,245 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
         return grants
     }
 
-    // MARK: - Private query helpers
+    // MARK: - Dependencies (pg_depend)
+
+    public func dependencies(for id: ObjectIdentifier) async throws -> [ObjectIdentifier] {
+        guard let schema = id.schema else { return [] }
+
+        let query: PostgresQuery = """
+            SELECT DISTINCT
+                CASE dep_c.relkind
+                    WHEN 'r' THEN 'table'
+                    WHEN 'v' THEN 'view'
+                    WHEN 'm' THEN 'matview'
+                    WHEN 'S' THEN 'sequence'
+                    WHEN 'f' THEN 'foreign_table'
+                    ELSE 'table'
+                END AS dep_type,
+                dep_ns.nspname AS dep_schema,
+                dep_c.relname AS dep_name
+            FROM pg_catalog.pg_depend d
+            JOIN pg_catalog.pg_class c ON c.oid = d.objid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_catalog.pg_class dep_c ON dep_c.oid = d.refobjid
+            JOIN pg_catalog.pg_namespace dep_ns ON dep_ns.oid = dep_c.relnamespace
+            WHERE n.nspname = \(schema)
+              AND c.relname = \(id.name)
+              AND d.deptype IN ('n', 'a')
+              AND dep_c.relname != \(id.name)
+              AND dep_ns.nspname NOT IN ('pg_catalog', 'information_schema')
+            UNION
+            SELECT DISTINCT
+                'enum' AS dep_type,
+                dep_ns.nspname AS dep_schema,
+                dep_t.typname AS dep_name
+            FROM pg_catalog.pg_depend d
+            JOIN pg_catalog.pg_class c ON c.oid = d.objid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_catalog.pg_type dep_t ON dep_t.oid = d.refobjid AND dep_t.typtype = 'e'
+            JOIN pg_catalog.pg_namespace dep_ns ON dep_ns.oid = dep_t.typnamespace
+            WHERE n.nspname = \(schema)
+              AND c.relname = \(id.name)
+              AND d.deptype IN ('n', 'a')
+              AND dep_ns.nspname NOT IN ('pg_catalog', 'information_schema')
+            UNION
+            SELECT DISTINCT
+                'function' AS dep_type,
+                dep_ns.nspname AS dep_schema,
+                dep_p.proname AS dep_name
+            FROM pg_catalog.pg_depend d
+            JOIN pg_catalog.pg_class c ON c.oid = d.objid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_catalog.pg_proc dep_p ON dep_p.oid = d.refobjid
+            JOIN pg_catalog.pg_namespace dep_ns ON dep_ns.oid = dep_p.pronamespace
+            WHERE n.nspname = \(schema)
+              AND c.relname = \(id.name)
+              AND d.deptype IN ('n', 'a')
+              AND dep_ns.nspname NOT IN ('pg_catalog', 'information_schema')
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        var deps: [ObjectIdentifier] = []
+        for try await row in rows {
+            let (typeStr, depSchema, depName) = try row.decode((String, String, String).self)
+            if let objType = ObjectType(rawValue: typeStr) {
+                deps.append(ObjectIdentifier(type: objType, schema: depSchema, name: depName))
+            }
+        }
+        return deps
+    }
+
+    // MARK: - Private listing helpers
+
+    private func listRelations(schema: String?, relkind: String, type: ObjectType) async throws -> [ObjectIdentifier] {
+        var results: [ObjectIdentifier] = []
+
+        let query: PostgresQuery
+        if let schema {
+            query = """
+                SELECT n.nspname, c.relname
+                FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relkind = \(relkind)
+                  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                  AND n.nspname = \(schema)
+                ORDER BY n.nspname, c.relname
+                """
+        } else {
+            query = """
+                SELECT n.nspname, c.relname
+                FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relkind = \(relkind)
+                  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                ORDER BY n.nspname, c.relname
+                """
+        }
+
+        let rows = try await connection.query(query, logger: logger)
+        for try await row in rows {
+            let (schemaName, name) = try row.decode((String, String).self)
+            results.append(ObjectIdentifier(type: type, schema: schemaName, name: name))
+        }
+        return results
+    }
+
+    private func listEnums(schema: String?) async throws -> [ObjectIdentifier] {
+        var results: [ObjectIdentifier] = []
+
+        let query: PostgresQuery
+        if let schema {
+            query = """
+                SELECT n.nspname, t.typname
+                FROM pg_catalog.pg_type t
+                JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+                WHERE t.typtype = 'e'
+                  AND n.nspname = \(schema)
+                ORDER BY n.nspname, t.typname
+                """
+        } else {
+            query = """
+                SELECT n.nspname, t.typname
+                FROM pg_catalog.pg_type t
+                JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+                WHERE t.typtype = 'e'
+                  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+                ORDER BY n.nspname, t.typname
+                """
+        }
+
+        let rows = try await connection.query(query, logger: logger)
+        for try await row in rows {
+            let (schemaName, name) = try row.decode((String, String).self)
+            results.append(ObjectIdentifier(type: .enum, schema: schemaName, name: name))
+        }
+        return results
+    }
+
+    private func listProcedures(schema: String?, kind: String, type: ObjectType) async throws -> [ObjectIdentifier] {
+        var results: [ObjectIdentifier] = []
+
+        let query: PostgresQuery
+        if let schema {
+            query = """
+                SELECT n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid) AS args
+                FROM pg_catalog.pg_proc p
+                JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+                WHERE p.prokind = \(kind)
+                  AND n.nspname = \(schema)
+                ORDER BY n.nspname, p.proname
+                """
+        } else {
+            query = """
+                SELECT n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid) AS args
+                FROM pg_catalog.pg_proc p
+                JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+                WHERE p.prokind = \(kind)
+                  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+                ORDER BY n.nspname, p.proname
+                """
+        }
+
+        let rows = try await connection.query(query, logger: logger)
+        for try await row in rows {
+            let (schemaName, name, args) = try row.decode((String, String, String).self)
+            let sig = args.isEmpty ? nil : "(\(args))"
+            results.append(ObjectIdentifier(type: type, schema: schemaName, name: name, signature: sig))
+        }
+        return results
+    }
+
+    private func listSchemas() async throws -> [ObjectIdentifier] {
+        let query: PostgresQuery = """
+            SELECT n.nspname
+            FROM pg_catalog.pg_namespace n
+            WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+              AND n.nspname NOT LIKE 'pg_temp_%'
+              AND n.nspname NOT LIKE 'pg_toast_temp_%'
+            ORDER BY n.nspname
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        var results: [ObjectIdentifier] = []
+        for try await row in rows {
+            let name = try row.decode(String.self)
+            results.append(ObjectIdentifier(type: .schema, name: name))
+        }
+        return results
+    }
+
+    private func listRoles() async throws -> [ObjectIdentifier] {
+        let query: PostgresQuery = """
+            SELECT r.rolname
+            FROM pg_catalog.pg_roles r
+            WHERE r.rolname NOT LIKE 'pg_%'
+              AND r.rolname != 'postgres'
+            ORDER BY r.rolname
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        var results: [ObjectIdentifier] = []
+        for try await row in rows {
+            let name = try row.decode(String.self)
+            results.append(ObjectIdentifier(type: .role, name: name))
+        }
+        return results
+    }
+
+    private func listExtensions() async throws -> [ObjectIdentifier] {
+        let query: PostgresQuery = """
+            SELECT e.extname
+            FROM pg_catalog.pg_extension e
+            WHERE e.extname != 'plpgsql'
+            ORDER BY e.extname
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        var results: [ObjectIdentifier] = []
+        for try await row in rows {
+            let name = try row.decode(String.self)
+            results.append(ObjectIdentifier(type: .extension, name: name))
+        }
+        return results
+    }
+
+    private func listForeignDataWrappers() async throws -> [ObjectIdentifier] {
+        let query: PostgresQuery = """
+            SELECT fdwname
+            FROM pg_catalog.pg_foreign_data_wrapper
+            ORDER BY fdwname
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        var results: [ObjectIdentifier] = []
+        for try await row in rows {
+            let name = try row.decode(String.self)
+            results.append(ObjectIdentifier(type: .foreignDataWrapper, name: name))
+        }
+        return results
+    }
+
+    // MARK: - Private column/constraint/index/trigger query helpers
 
     private func queryColumns(schema: String, name: String) async throws -> [ColumnInfo] {
         let query: PostgresQuery = """

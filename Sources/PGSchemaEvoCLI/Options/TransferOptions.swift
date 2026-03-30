@@ -21,4 +21,7 @@ struct TransferOptions: ParsableArguments {
 
     @Flag(name: .long, help: "DROP IF EXISTS before CREATE")
     var dropExisting: Bool = false
+
+    @Flag(name: [.short, .long], help: "Enable verbose logging output")
+    var verbose: Bool = false
 }

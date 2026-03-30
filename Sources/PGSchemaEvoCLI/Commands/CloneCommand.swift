@@ -15,7 +15,8 @@ struct CloneCommand: AsyncParsableCommand {
 
     func run() async throws {
         // Configure logging
-        let logger = Logger(label: "pg-schema-evo")
+        var logger = Logger(label: "pg-schema-evo")
+        logger.logLevel = transfer.verbose ? .debug : .info
 
         // Parse connections
         let sourceConfig = try ConnectionConfig.fromDSN(source.sourceDsn)
