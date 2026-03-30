@@ -21,24 +21,10 @@ struct InspectCommand: AsyncParsableCommand {
         let sourceConfig = try ConnectionConfig.fromDSN(source.sourceDsn)
         let objectId = try parseObjectSpecifier(object)
 
-        let pgConfig = PostgresConnection.Configuration(
-            host: sourceConfig.host,
-            port: sourceConfig.port,
-            username: sourceConfig.username,
-            password: sourceConfig.password,
-            database: sourceConfig.database,
-            tls: .disable
-        )
-
-        let connection = try await PostgresConnection.connect(
-            configuration: pgConfig,
-            id: 1,
+        let connection = try await PostgresConnectionHelper.connect(
+            config: sourceConfig,
             logger: logger
         )
-
-        defer {
-            Task { try? await connection.close() }
-        }
 
         let introspector = PGCatalogIntrospector(connection: connection, logger: logger)
 
@@ -53,6 +39,8 @@ struct InspectCommand: AsyncParsableCommand {
         default:
             print("Inspection not yet supported for type: \(objectId.type.displayName)")
         }
+
+        try? await connection.close()
     }
 
     private func printTableMetadata(_ table: TableMetadata) {

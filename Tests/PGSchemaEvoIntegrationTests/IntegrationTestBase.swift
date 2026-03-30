@@ -26,24 +26,12 @@ enum IntegrationTestConfig {
     }
 
     static func connect(to config: ConnectionConfig) async throws -> PostgresConnection {
-        let pgConfig = PostgresConnection.Configuration(
-            host: config.host,
-            port: config.port,
-            username: config.username,
-            password: config.password,
-            database: config.database,
-            tls: .disable
-        )
-        return try await PostgresConnection.connect(
-            configuration: pgConfig,
-            id: 1,
-            logger: logger
-        )
+        try await PostgresConnectionHelper.connect(config: config, logger: logger)
     }
 
     /// Execute raw SQL on a connection, ignoring results.
     static func execute(_ sql: String, on connection: PostgresConnection) async throws {
-        try await connection.query(PostgresQuery(unsafeSQL: sql), logger: logger)
+        _ = try await connection.query(PostgresQuery(unsafeSQL: sql), logger: logger)
     }
 
     /// Clean up test objects from the target database.
