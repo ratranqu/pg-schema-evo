@@ -13,19 +13,9 @@ struct CloneCommand: AsyncParsableCommand {
     @OptionGroup var objects: ObjectSpecOptions
     @OptionGroup var transfer: TransferOptions
 
-    @Flag(name: .shortAndLong, help: "Increase log verbosity (use -vv for debug)")
-    var verbose: Int
-
     func run() async throws {
         // Configure logging
-        var logLevel: Logger.Level = .warning
-        if verbose >= 2 {
-            logLevel = .debug
-        } else if verbose >= 1 {
-            logLevel = .info
-        }
-        var logger = Logger(label: "pg-schema-evo")
-        logger.logLevel = logLevel
+        let logger = Logger(label: "pg-schema-evo")
 
         // Parse connections
         let sourceConfig = try ConnectionConfig.fromDSN(source.sourceDsn)

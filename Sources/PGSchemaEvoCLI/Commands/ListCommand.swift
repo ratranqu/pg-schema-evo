@@ -23,24 +23,10 @@ struct ListCommand: AsyncParsableCommand {
 
         let sourceConfig = try ConnectionConfig.fromDSN(source.sourceDsn)
 
-        let pgConfig = PostgresConnection.Configuration(
-            host: sourceConfig.host,
-            port: sourceConfig.port,
-            username: sourceConfig.username,
-            password: sourceConfig.password,
-            database: sourceConfig.database,
-            tls: .disable
-        )
-
-        let connection = try await PostgresConnection.connect(
-            configuration: pgConfig,
-            id: 1,
+        let connection = try await PostgresConnectionHelper.connect(
+            config: sourceConfig,
             logger: logger
         )
-
-        defer {
-            Task { try? await connection.close() }
-        }
 
         let introspector = PGCatalogIntrospector(connection: connection, logger: logger)
 
@@ -64,5 +50,7 @@ struct ListCommand: AsyncParsableCommand {
         if objects.isEmpty {
             print("No objects found.")
         }
+
+        try? await connection.close()
     }
 }
