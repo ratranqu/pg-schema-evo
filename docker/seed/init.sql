@@ -13,6 +13,17 @@ CREATE TYPE public.order_status AS ENUM ('pending', 'processing', 'shipped', 'de
 CREATE TYPE public.user_role AS ENUM ('admin', 'editor', 'viewer');
 
 -- ============================================================
+-- Composite Types
+-- ============================================================
+CREATE TYPE public.address AS (
+    street text,
+    city text,
+    state text,
+    zip_code text,
+    country text
+);
+
+-- ============================================================
 -- Tables
 -- ============================================================
 CREATE TABLE public.users (

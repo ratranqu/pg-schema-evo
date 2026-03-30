@@ -305,6 +305,61 @@ struct IntrospectionIntegrationTests {
         #expect(types.contains(.enum))
     }
 
+    @Test("Introspect composite type")
+    func introspectCompositeType() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let connection = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await connection.close() } }
+
+        let introspector = PGCatalogIntrospector(
+            connection: connection,
+            logger: IntegrationTestConfig.logger
+        )
+
+        let id = ObjectIdentifier(type: .compositeType, schema: "public", name: "address")
+        let metadata = try await introspector.describeCompositeType(id)
+
+        let attrNames = metadata.attributes.map(\.name)
+        #expect(attrNames.contains("street"))
+        #expect(attrNames.contains("city"))
+        #expect(attrNames.contains("country"))
+    }
+
+    @Test("FK dependencies are discovered")
+    func fkDependencies() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let connection = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await connection.close() } }
+
+        let introspector = PGCatalogIntrospector(
+            connection: connection,
+            logger: IntegrationTestConfig.logger
+        )
+
+        // orders has FK to users — should show up as a dependency
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "orders")
+        let deps = try await introspector.dependencies(for: id)
+
+        let depNames = deps.map(\.name)
+        #expect(depNames.contains("users"))
+    }
+
+    @Test("List composite types")
+    func listCompositeTypes() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let connection = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await connection.close() } }
+
+        let introspector = PGCatalogIntrospector(
+            connection: connection,
+            logger: IntegrationTestConfig.logger
+        )
+
+        let objects = try await introspector.listObjects(schema: "public", types: [.compositeType])
+        let names = objects.map(\.name)
+        #expect(names.contains("address"))
+    }
+
     @Test("Resolve dependencies does not throw")
     func resolveDependencies() async throws {
         let config = try IntegrationTestConfig.sourceConfig()

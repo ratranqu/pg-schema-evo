@@ -278,6 +278,30 @@ public struct ExtensionMetadata: ObjectMetadata {
     }
 }
 
+// MARK: - Composite Type Metadata
+
+public struct CompositeTypeAttribute: Sendable {
+    public let name: String
+    public let dataType: String
+    public let ordinalPosition: Int
+
+    public init(name: String, dataType: String, ordinalPosition: Int) {
+        self.name = name
+        self.dataType = dataType
+        self.ordinalPosition = ordinalPosition
+    }
+}
+
+public struct CompositeTypeMetadata: ObjectMetadata {
+    public let id: ObjectIdentifier
+    public let attributes: [CompositeTypeAttribute]
+
+    public init(id: ObjectIdentifier, attributes: [CompositeTypeAttribute]) {
+        self.id = id
+        self.attributes = attributes
+    }
+}
+
 // MARK: - PgDump-based Metadata (hybrid approach for exotic types)
 // Aggregates, operators, FDW, and foreign tables use pg_dump for DDL extraction
 // rather than full pg_catalog introspection. See ARCHITECTURE.md for rationale.

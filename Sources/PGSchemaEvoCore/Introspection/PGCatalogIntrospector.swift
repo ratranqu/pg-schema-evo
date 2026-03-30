@@ -344,6 +344,47 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
         return roles
     }
 
+    // MARK: - Composite Type
+
+    public func describeCompositeType(_ id: ObjectIdentifier) async throws -> CompositeTypeMetadata {
+        guard let schema = id.schema else {
+            throw PGSchemaEvoError.invalidObjectSpec("Composite type requires a schema: \(id)")
+        }
+
+        let query: PostgresQuery = """
+            SELECT
+                a.attname AS attr_name,
+                pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+                a.attnum::integer AS ordinal_position
+            FROM pg_catalog.pg_type t
+            JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+            JOIN pg_catalog.pg_attribute a ON a.attrelid = t.typrelid
+            WHERE n.nspname = \(schema)
+              AND t.typname = \(id.name)
+              AND t.typtype = 'c'
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+            ORDER BY a.attnum
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        var attributes: [CompositeTypeAttribute] = []
+        for try await row in rows {
+            let (name, dataType, position) = try row.decode((String, String, Int).self)
+            attributes.append(CompositeTypeAttribute(
+                name: name,
+                dataType: dataType,
+                ordinalPosition: position
+            ))
+        }
+
+        guard !attributes.isEmpty else {
+            throw PGSchemaEvoError.objectNotFound(id)
+        }
+
+        return CompositeTypeMetadata(id: id, attributes: attributes)
+    }
+
     // MARK: - Extension
 
     public func describeExtension(_ id: ObjectIdentifier) async throws -> ExtensionMetadata {
@@ -420,7 +461,9 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
                 try await results.append(contentsOf: listRelations(schema: schema, relkind: "f", type: .foreignTable))
             case .foreignDataWrapper:
                 try await results.append(contentsOf: listForeignDataWrappers())
-            case .operator, .compositeType:
+            case .compositeType:
+                try await results.append(contentsOf: listCompositeTypes(schema: schema))
+            case .operator:
                 logger.debug("Listing not yet implemented for type: \(type.displayName)")
             }
         }
@@ -509,6 +552,43 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
             WHERE n.nspname = \(schema)
               AND c.relname = \(id.name)
               AND d.deptype IN ('n', 'a')
+              AND dep_ns.nspname NOT IN ('pg_catalog', 'information_schema')
+            UNION
+            SELECT DISTINCT
+                'table' AS dep_type,
+                ref_ns.nspname AS dep_schema,
+                ref_c.relname AS dep_name
+            FROM pg_catalog.pg_constraint con
+            JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_catalog.pg_class ref_c ON ref_c.oid = con.confrelid
+            JOIN pg_catalog.pg_namespace ref_ns ON ref_ns.oid = ref_c.relnamespace
+            WHERE n.nspname = \(schema)
+              AND c.relname = \(id.name)
+              AND con.contype = 'f'
+              AND ref_c.relname != \(id.name)
+              AND ref_ns.nspname NOT IN ('pg_catalog', 'information_schema')
+            UNION
+            SELECT DISTINCT
+                CASE dep_c.relkind
+                    WHEN 'r' THEN 'table'
+                    WHEN 'v' THEN 'view'
+                    WHEN 'm' THEN 'matview'
+                    WHEN 'S' THEN 'sequence'
+                    WHEN 'f' THEN 'foreign_table'
+                    ELSE 'table'
+                END AS dep_type,
+                dep_ns.nspname AS dep_schema,
+                dep_c.relname AS dep_name
+            FROM pg_catalog.pg_depend d
+            JOIN pg_catalog.pg_rewrite rw ON rw.oid = d.objid
+            JOIN pg_catalog.pg_class c ON c.oid = rw.ev_class
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_catalog.pg_class dep_c ON dep_c.oid = d.refobjid
+            JOIN pg_catalog.pg_namespace dep_ns ON dep_ns.oid = dep_c.relnamespace
+            WHERE n.nspname = \(schema)
+              AND c.relname = \(id.name)
+              AND dep_c.relname != \(id.name)
               AND dep_ns.nspname NOT IN ('pg_catalog', 'information_schema')
             """
 
@@ -673,6 +753,46 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
         for try await row in rows {
             let name = try row.decode(String.self)
             results.append(ObjectIdentifier(type: .extension, name: name))
+        }
+        return results
+    }
+
+    private func listCompositeTypes(schema: String?) async throws -> [ObjectIdentifier] {
+        var results: [ObjectIdentifier] = []
+
+        let query: PostgresQuery
+        if let schema {
+            query = """
+                SELECT n.nspname, t.typname
+                FROM pg_catalog.pg_type t
+                JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+                WHERE t.typtype = 'c'
+                  AND n.nspname = \(schema)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM pg_catalog.pg_class c
+                      WHERE c.oid = t.typrelid AND c.relkind != 'c'
+                  )
+                ORDER BY n.nspname, t.typname
+                """
+        } else {
+            query = """
+                SELECT n.nspname, t.typname
+                FROM pg_catalog.pg_type t
+                JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+                WHERE t.typtype = 'c'
+                  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM pg_catalog.pg_class c
+                      WHERE c.oid = t.typrelid AND c.relkind != 'c'
+                  )
+                ORDER BY n.nspname, t.typname
+                """
+        }
+
+        let rows = try await connection.query(query, logger: logger)
+        for try await row in rows {
+            let (schemaName, name) = try row.decode((String, String).self)
+            results.append(ObjectIdentifier(type: .compositeType, schema: schemaName, name: name))
         }
         return results
     }

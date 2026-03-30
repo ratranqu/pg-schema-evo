@@ -18,6 +18,9 @@ struct InspectCommand: AsyncParsableCommand {
         var logger = Logger(label: "pg-schema-evo")
         logger.logLevel = .warning
 
+        guard !source.sourceDsn.isEmpty else {
+            throw ValidationError("--source-dsn is required")
+        }
         let sourceConfig = try ConnectionConfig.fromDSN(source.sourceDsn)
         let objectId = try parseObjectSpecifier(object)
 
@@ -102,6 +105,14 @@ struct InspectCommand: AsyncParsableCommand {
             print("  CreateDB: \(metadata.canCreateDB)  CreateRole: \(metadata.canCreateRole)")
             if !metadata.memberOf.isEmpty {
                 print("  Member of: \(metadata.memberOf.joined(separator: ", "))")
+            }
+
+        case .compositeType:
+            let metadata = try await introspector.describeCompositeType(objectId)
+            print("Composite Type: \(metadata.id.qualifiedName)")
+            print("\nAttributes:")
+            for attr in metadata.attributes {
+                print("  \(attr.name) \(attr.dataType)")
             }
 
         case .extension:

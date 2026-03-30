@@ -24,6 +24,9 @@ public protocol SchemaIntrospector: Sendable {
     /// Retrieve role metadata.
     func describeRole(_ id: ObjectIdentifier) async throws -> RoleMetadata
 
+    /// Retrieve composite type metadata.
+    func describeCompositeType(_ id: ObjectIdentifier) async throws -> CompositeTypeMetadata
+
     /// Retrieve extension metadata.
     func describeExtension(_ id: ObjectIdentifier) async throws -> ExtensionMetadata
 

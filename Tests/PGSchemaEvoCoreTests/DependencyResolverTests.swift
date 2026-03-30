@@ -71,6 +71,9 @@ private final class MockIntrospector: SchemaIntrospector, @unchecked Sendable {
     func describeRole(_ id: ObjectIdentifier) async throws -> RoleMetadata {
         throw PGSchemaEvoError.objectNotFound(id)
     }
+    func describeCompositeType(_ id: ObjectIdentifier) async throws -> CompositeTypeMetadata {
+        throw PGSchemaEvoError.objectNotFound(id)
+    }
     func describeExtension(_ id: ObjectIdentifier) async throws -> ExtensionMetadata {
         throw PGSchemaEvoError.objectNotFound(id)
     }

@@ -31,6 +31,7 @@ public struct CloneOrchestrator: Sendable {
         let enumSQLGen = EnumSQLGenerator()
         let funcSQLGen = FunctionSQLGenerator()
         let schemaSQLGen = SchemaSQLGenerator()
+        let compositeTypeSQLGen = CompositeTypeSQLGenerator()
         let permissionSQLGen = PermissionSQLGenerator()
 
         var steps: [CloneStep] = []
@@ -95,6 +96,11 @@ public struct CloneOrchestrator: Sendable {
                     let createSQL = try enumSQLGen.generateCreate(from: metadata)
                     steps.append(.createObject(sql: createSQL, id: spec.id))
 
+                case .compositeType:
+                    let metadata = try await introspector.describeCompositeType(spec.id)
+                    let createSQL = try compositeTypeSQLGen.generateCreate(from: metadata)
+                    steps.append(.createObject(sql: createSQL, id: spec.id))
+
                 case .function, .procedure:
                     let metadata = try await introspector.describeFunction(spec.id)
                     let createSQL = try funcSQLGen.generateCreate(from: metadata)
@@ -130,9 +136,6 @@ public struct CloneOrchestrator: Sendable {
                         )
                         steps.append(.copyData(id: spec.id, method: method, estimatedSize: size))
                     }
-
-                case .compositeType:
-                    logger.warning("Composite type cloning not yet supported: \(spec.id)")
                 }
 
                 // Permissions
@@ -152,12 +155,25 @@ public struct CloneOrchestrator: Sendable {
         try? await connection.close()
 
         if job.dryRun {
+            let progress = ProgressReporter(totalSteps: steps.count)
+            progress.reportDryRun()
             let renderer = ScriptRenderer()
             return renderer.render(job: job, steps: steps)
         } else {
+            // Confirmation prompt unless --force
+            if !job.force {
+                let progress = ProgressReporter(totalSteps: steps.count)
+                let response = progress.reportConfirmation(
+                    targetDSN: job.target.toDSN(maskPassword: true)
+                )
+                guard response.lowercased() == "yes" else {
+                    return "Aborted by user."
+                }
+            }
+
             let executor = LiveExecutor(logger: logger)
             try await executor.execute(steps: steps, job: job)
-            return "Clone completed successfully. \(steps.count) step(s) executed."
+            return ""
         }
     }
 

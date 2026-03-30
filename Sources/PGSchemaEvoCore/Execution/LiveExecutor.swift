@@ -30,71 +30,83 @@ public struct LiveExecutor: Sendable {
         let env = job.target.environment()
         let sourceEnv = job.source.environment()
 
+        let progress = ProgressReporter(totalSteps: steps.count)
+        progress.reportStart(objectCount: job.objects.count)
+
         for (index, step) in steps.enumerated() {
-            logger.info("Step \(index + 1)/\(steps.count): \(stepDescription(step))")
+            let stepNum = index + 1
+            let desc = stepDescription(step)
+            progress.reportStep(stepNum, description: desc)
 
-            switch step {
-            case .dropObject(let id):
-                let dropSQL = generateDropSQL(for: id)
-                try await executePsql(
-                    psqlPath: psqlPath,
-                    dsn: targetDSN,
-                    sql: dropSQL,
-                    env: env,
-                    description: "DROP \(id)"
-                )
-
-            case .createObject(let sql, let id):
-                try await executePsql(
-                    psqlPath: psqlPath,
-                    dsn: targetDSN,
-                    sql: sql,
-                    env: env,
-                    description: "CREATE \(id)"
-                )
-
-            case .copyData(let id, let method, _):
-                switch method {
-                case .copy, .auto:
-                    try await copyViaPsqlPipe(
+            do {
+                switch step {
+                case .dropObject(let id):
+                    let dropSQL = generateDropSQL(for: id)
+                    try await executePsql(
                         psqlPath: psqlPath,
-                        sourceDSN: sourceDSN,
-                        targetDSN: targetDSN,
-                        id: id,
-                        sourceEnv: sourceEnv,
-                        targetEnv: env
+                        dsn: targetDSN,
+                        sql: dropSQL,
+                        env: env,
+                        description: "DROP \(id)"
                     )
-                case .pgDump:
-                    try await copyViaPgDump(
-                        sourceDSN: sourceDSN,
-                        targetDSN: targetDSN,
-                        id: id,
-                        sourceEnv: sourceEnv
+
+                case .createObject(let sql, let id):
+                    try await executePsql(
+                        psqlPath: psqlPath,
+                        dsn: targetDSN,
+                        sql: sql,
+                        env: env,
+                        description: "CREATE \(id)"
+                    )
+
+                case .copyData(let id, let method, _):
+                    switch method {
+                    case .copy, .auto:
+                        try await copyViaPsqlPipe(
+                            psqlPath: psqlPath,
+                            sourceDSN: sourceDSN,
+                            targetDSN: targetDSN,
+                            id: id,
+                            sourceEnv: sourceEnv,
+                            targetEnv: env
+                        )
+                    case .pgDump:
+                        try await copyViaPgDump(
+                            sourceDSN: sourceDSN,
+                            targetDSN: targetDSN,
+                            id: id,
+                            sourceEnv: sourceEnv
+                        )
+                    }
+
+                case .grantPermissions(let sql, _):
+                    try await executePsql(
+                        psqlPath: psqlPath,
+                        dsn: targetDSN,
+                        sql: sql,
+                        env: env,
+                        description: "GRANT permissions"
+                    )
+
+                case .refreshMaterializedView(let id):
+                    let sql = "REFRESH MATERIALIZED VIEW \(id.qualifiedName);"
+                    try await executePsql(
+                        psqlPath: psqlPath,
+                        dsn: targetDSN,
+                        sql: sql,
+                        env: env,
+                        description: "REFRESH \(id)"
                     )
                 }
 
-            case .grantPermissions(let sql, _):
-                try await executePsql(
-                    psqlPath: psqlPath,
-                    dsn: targetDSN,
-                    sql: sql,
-                    env: env,
-                    description: "GRANT permissions"
-                )
-
-            case .refreshMaterializedView(let id):
-                let sql = "REFRESH MATERIALIZED VIEW \(id.qualifiedName);"
-                try await executePsql(
-                    psqlPath: psqlPath,
-                    dsn: targetDSN,
-                    sql: sql,
-                    env: env,
-                    description: "REFRESH \(id)"
-                )
+                progress.reportStepComplete(stepNum, description: desc)
+            } catch {
+                progress.reportStepFailed(stepNum, description: desc, error: error.localizedDescription)
+                throw error
             }
         }
 
-        logger.info("All \(steps.count) steps completed successfully")
+        progress.reportComplete(stepCount: steps.count)
     }
 
     // MARK: - Private
