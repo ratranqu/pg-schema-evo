@@ -63,6 +63,13 @@ public struct ScriptRenderer: Sendable {
         case .grantPermissions(let sql, let id):
             section += sectionHeader(number, "Permissions: \(id)")
             section += wrapInPsql(sql, target: "$TARGET_DSN")
+
+        case .refreshMaterializedView(let id):
+            section += sectionHeader(number, "Refresh materialized view: \(id)")
+            section += wrapInPsql(
+                "REFRESH MATERIALIZED VIEW \(id.qualifiedName);",
+                target: "$TARGET_DSN"
+            )
         }
 
         return section
@@ -114,7 +121,12 @@ public struct ScriptRenderer: Sendable {
         case .procedure: "PROCEDURE"
         case .schema: "SCHEMA"
         case .extension: "EXTENSION"
-        default: "TABLE"
+        case .enum, .compositeType: "TYPE"
+        case .role: "ROLE"
+        case .aggregate: "AGGREGATE"
+        case .operator: "OPERATOR"
+        case .foreignDataWrapper: "FOREIGN DATA WRAPPER"
+        case .foreignTable: "FOREIGN TABLE"
         }
     }
 
@@ -136,4 +148,5 @@ public enum CloneStep: Sendable {
     case createObject(sql: String, id: ObjectIdentifier)
     case copyData(id: ObjectIdentifier, method: TransferMethod, estimatedSize: Int?)
     case grantPermissions(sql: String, id: ObjectIdentifier)
+    case refreshMaterializedView(ObjectIdentifier)
 }

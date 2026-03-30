@@ -44,11 +44,8 @@ struct IntrospectionIntegrationTests {
         let id = ObjectIdentifier(type: .table, schema: "public", name: "users")
         let metadata = try await introspector.describeTable(id)
 
-        let constraintNames = metadata.constraints.map(\.name)
-        // Should have primary key
         let hasPK = metadata.constraints.contains { $0.type == .primaryKey }
         #expect(hasPK)
-        // Should have unique constraint on username
         let hasUnique = metadata.constraints.contains { $0.type == .unique }
         #expect(hasUnique)
     }
@@ -67,11 +64,8 @@ struct IntrospectionIntegrationTests {
         let id = ObjectIdentifier(type: .table, schema: "public", name: "orders")
         let metadata = try await introspector.describeTable(id)
 
-        // Should have FK to users
         let hasFK = metadata.constraints.contains { $0.type == .foreignKey }
         #expect(hasFK)
-
-        // Should have indexes
         #expect(!metadata.indexes.isEmpty)
     }
 
@@ -143,8 +137,6 @@ struct IntrospectionIntegrationTests {
 
         let id = ObjectIdentifier(type: .table, schema: "public", name: "users")
         let grants = try await introspector.permissions(for: id)
-
-        // Should have at least the readonly_role and app_role grants
         #expect(!grants.isEmpty)
     }
 
@@ -162,6 +154,175 @@ struct IntrospectionIntegrationTests {
         let id = ObjectIdentifier(type: .table, schema: "public", name: "nonexistent_table_xyz")
         await #expect(throws: PGSchemaEvoError.self) {
             try await introspector.describeTable(id)
+        }
+    }
+
+    // MARK: - New object type introspection tests
+
+    @Test("Introspect view definition")
+    func introspectView() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let connection = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await connection.close() } }
+
+        let introspector = PGCatalogIntrospector(
+            connection: connection,
+            logger: IntegrationTestConfig.logger
+        )
+
+        let id = ObjectIdentifier(type: .view, schema: "public", name: "active_users")
+        let metadata = try await introspector.describeView(id)
+
+        #expect(metadata.definition.contains("users"))
+        #expect(!metadata.columns.isEmpty)
+    }
+
+    @Test("Introspect materialized view")
+    func introspectMaterializedView() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let connection = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await connection.close() } }
+
+        let introspector = PGCatalogIntrospector(
+            connection: connection,
+            logger: IntegrationTestConfig.logger
+        )
+
+        let id = ObjectIdentifier(type: .materializedView, schema: "analytics", name: "daily_order_summary")
+        let metadata = try await introspector.describeMaterializedView(id)
+
+        #expect(metadata.definition.contains("orders"))
+    }
+
+    @Test("Introspect standalone sequence")
+    func introspectSequence() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let connection = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await connection.close() } }
+
+        let introspector = PGCatalogIntrospector(
+            connection: connection,
+            logger: IntegrationTestConfig.logger
+        )
+
+        let id = ObjectIdentifier(type: .sequence, schema: "public", name: "invoice_number_seq")
+        let metadata = try await introspector.describeSequence(id)
+
+        #expect(metadata.startValue == 1000)
+        #expect(metadata.increment == 1)
+    }
+
+    @Test("Introspect enum type labels")
+    func introspectEnum() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let connection = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await connection.close() } }
+
+        let introspector = PGCatalogIntrospector(
+            connection: connection,
+            logger: IntegrationTestConfig.logger
+        )
+
+        let id = ObjectIdentifier(type: .enum, schema: "public", name: "order_status")
+        let metadata = try await introspector.describeEnum(id)
+
+        #expect(metadata.labels.contains("pending"))
+        #expect(metadata.labels.contains("shipped"))
+        #expect(metadata.labels.contains("delivered"))
+    }
+
+    @Test("Introspect function")
+    func introspectFunction() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let connection = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await connection.close() } }
+
+        let introspector = PGCatalogIntrospector(
+            connection: connection,
+            logger: IntegrationTestConfig.logger
+        )
+
+        let id = ObjectIdentifier(type: .function, schema: "public", name: "calculate_order_total")
+        let metadata = try await introspector.describeFunction(id)
+
+        #expect(metadata.language == "sql")
+        #expect(metadata.volatility == "STABLE")
+        #expect(metadata.returnType != nil)
+    }
+
+    @Test("Introspect schema")
+    func introspectSchema() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let connection = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await connection.close() } }
+
+        let introspector = PGCatalogIntrospector(
+            connection: connection,
+            logger: IntegrationTestConfig.logger
+        )
+
+        let id = ObjectIdentifier(type: .schema, name: "analytics")
+        let metadata = try await introspector.describeSchema(id)
+
+        #expect(!metadata.owner.isEmpty)
+    }
+
+    @Test("Introspect role")
+    func introspectRole() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let connection = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await connection.close() } }
+
+        let introspector = PGCatalogIntrospector(
+            connection: connection,
+            logger: IntegrationTestConfig.logger
+        )
+
+        let id = ObjectIdentifier(type: .role, name: "readonly_role")
+        let metadata = try await introspector.describeRole(id)
+
+        #expect(metadata.canLogin == false)
+        #expect(metadata.isSuperuser == false)
+    }
+
+    @Test("List multiple object types")
+    func listMultipleTypes() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let connection = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await connection.close() } }
+
+        let introspector = PGCatalogIntrospector(
+            connection: connection,
+            logger: IntegrationTestConfig.logger
+        )
+
+        let objects = try await introspector.listObjects(schema: "public", types: [.table, .view, .sequence, .enum])
+
+        let types = Set(objects.map(\.type))
+        #expect(types.contains(.table))
+        #expect(types.contains(.view))
+        #expect(types.contains(.sequence))
+        #expect(types.contains(.enum))
+    }
+
+    @Test("Resolve dependencies does not throw")
+    func resolveDependencies() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let connection = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await connection.close() } }
+
+        let introspector = PGCatalogIntrospector(
+            connection: connection,
+            logger: IntegrationTestConfig.logger
+        )
+
+        // Test that dependency resolution works without errors
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "orders")
+        let deps = try await introspector.dependencies(for: id)
+
+        // Verify returned deps have valid types
+        for dep in deps {
+            #expect(dep.type.isSchemaScoped || dep.type == .role || dep.type == .extension || dep.type == .schema)
         }
     }
 }
