@@ -150,6 +150,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download unit coverage
         uses: actions/download-artifact@v4
         with:
@@ -237,12 +239,9 @@ jobs:
       - name: Update README coverage badge (main branch)
         if: github.ref == 'refs/heads/main'
         run: |
-          apt-get install -y -qq git > /dev/null 2>&1
           COVERAGE="${{ steps.coverage.outputs.line_coverage }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin main
-          git checkout main
 
           # Update the coverage line in README.md
           sed -i "s/| Line coverage | .*|/| Line coverage | **${COVERAGE}%** (max 1% regression per PR) |/" README.md
