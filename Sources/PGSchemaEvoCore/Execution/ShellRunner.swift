@@ -46,7 +46,9 @@ public struct ShellRunner: Sendable {
 
             do {
                 try process.run()
+                SignalHandler.shared.registerProcess(process)
                 process.waitUntilExit()
+                SignalHandler.shared.unregisterProcess()
 
                 let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
                 let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()

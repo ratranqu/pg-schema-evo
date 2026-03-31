@@ -80,12 +80,12 @@ RLS policies can be optionally cloned (`--rls` flag or `rls: true` in YAML). The
 | 3 | YAML config files with env var interpolation, composite types, FK + view dependency resolution, progress output, Docker image, shell completions |
 | 4 | Schema diffing (`diff` command), selective data (WHERE/row limits), pre-flight validation (`check` command), declarative partitions, RLS policies, retry with rollback, code coverage in CI |
 | 5 | True transaction isolation via single-session execution, CI optimization (shared build cache, Docker build gating) |
+| 6 | Graceful SIGINT/SIGTERM signal handling with automatic rollback on interrupt |
 
 ### Future Work
 
 | Area | Description |
 |------|-------------|
-| Signal handling | Graceful SIGINT/SIGTERM handling with rollback on interrupt |
 | Incremental sync | Detect what has changed since last clone and only transfer deltas |
 | Schema migration | Generate and apply ALTER statements from `diff` output instead of DROP/CREATE |
 | Conflict resolution | Interactive merge when target has diverged from source |

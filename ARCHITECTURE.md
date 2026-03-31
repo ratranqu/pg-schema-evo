@@ -150,6 +150,19 @@ Because everything runs in one PostgreSQL session, `BEGIN`/`COMMIT` provide genu
 atomicity — either all objects are created or nothing is committed. On failure,
 PostgreSQL automatically rolls back when the session disconnects.
 
+## Signal Handling
+
+The tool intercepts SIGINT (Ctrl+C) and SIGTERM for graceful shutdown during live
+execution. When a signal is received:
+
+1. The active child process (psql) is terminated
+2. PostgreSQL automatically rolls back the uncommitted transaction on disconnect
+3. A clear message is printed explaining the rollback
+4. The process exits with 128 + signal number (standard Unix convention)
+
+Signal handlers are installed only during live execution and uninstalled afterward,
+so they don't interfere with dry-run mode or other subcommands.
+
 ## Retry and Rollback
 
 - On failure: the transaction is automatically rolled back (session disconnect),
@@ -170,7 +183,7 @@ Sources/
     ├── SQLGen/              # DDL generators per object type
     ├── Dependencies/        # DependencyResolver with topological sort
     ├── Execution/           # CloneOrchestrator, LiveExecutor, ScriptRenderer, ShellRunner,
-    │                        #   ProgressReporter, PreflightChecker
+    │                        #   ProgressReporter, PreflightChecker, SignalHandler
     ├── Errors/              # PGSchemaEvoError enum
     ├── Config/              # ConfigLoader (YAML parsing with env var interpolation)
     └── Diff/                # SchemaDiffer (cross-database schema comparison)
