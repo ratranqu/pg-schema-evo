@@ -84,29 +84,84 @@ threshold, `pg_dump --format=custom | pg_restore` for larger tables.
 
 When `--cascade` is enabled, the tool:
 
-1. Queries `pg_depend` for each requested object to discover dependencies
+1. Queries `pg_depend` for general dependencies, `pg_constraint` for foreign keys,
+   and `pg_rewrite` for view references
 2. Recursively resolves transitive dependencies
 3. Applies topological sort (Kahn's algorithm) to determine creation order
 4. Detects cycles and reports them as errors
 
-The natural type ordering (roles → schemas → extensions → enums → sequences →
-tables → views → functions) is used as a tiebreaker within the topological sort.
+The natural type ordering (roles → schemas → extensions → enums → composite types →
+sequences → tables → views → functions) is used as a tiebreaker within the
+topological sort.
+
+## Schema Diffing
+
+The `diff` subcommand compares metadata between source and target databases using
+`SchemaDiffer`. It produces a `SchemaDiff` report identifying:
+
+- Objects only in source
+- Objects only in target
+- Objects present in both but structurally different (columns, constraints, indexes)
+
+Output can be rendered as a text summary or as migration SQL (`--sql` flag).
+
+## Pre-flight Validation
+
+Before live execution, `PreflightChecker` validates:
+
+- Source and target database connectivity
+- `psql` binary availability in PATH
+- Requested objects exist on the source
+- No conflicting objects already exist on the target
+
+Pre-flight checks run automatically before live execution and can be run
+standalone via the `check` subcommand. Use `--skip-preflight` to bypass.
+
+## Partitioned Table Support
+
+Declarative partitioned tables (PostgreSQL 10+) are automatically handled:
+
+1. The parent table is created with its `PARTITION BY` clause
+2. Each child partition is created as a standalone table
+3. Children are attached to the parent with their bound specs via `ALTER TABLE ... ATTACH PARTITION`
+
+Partition metadata is introspected from `pg_partitioned_table` (strategy, partition
+key) and `pg_inherits` (child partitions and bound specs).
+
+## Row-Level Security
+
+When `--rls` is enabled (or `rls: true` in YAML config), the tool:
+
+1. Introspects RLS policies from `pg_policy` for each table
+2. Enables RLS on the target table (`ALTER TABLE ... ENABLE ROW LEVEL SECURITY`)
+3. Recreates each policy with its original definition
+
+## Retry and Rollback
+
+Live execution wraps the entire clone in a database transaction:
+
+- On failure: `ROLLBACK` is issued, then the tool waits with exponential backoff
+  (2^attempt seconds) before retrying
+- Default: 3 retry attempts (configurable via `--retries` or YAML config)
+- On success: `COMMIT` finalizes all changes atomically
 
 ## Project Structure
 
 ```
 Sources/
 ├── PGSchemaEvoCLI/          # CLI entry point and argument parsing
-│   ├── Commands/            # clone, inspect, list subcommands
+│   ├── Commands/            # clone, diff, check, inspect, list subcommands
 │   └── Options/             # @OptionGroup structs (connection, transfer, objects)
 └── PGSchemaEvoCore/         # Core library
     ├── Model/               # Data types (ObjectIdentifier, CloneJob, metadata)
     ├── Introspection/       # PGCatalogIntrospector, PgDumpIntrospector
     ├── SQLGen/              # DDL generators per object type
     ├── Dependencies/        # DependencyResolver with topological sort
-    ├── Execution/           # CloneOrchestrator, LiveExecutor, ScriptRenderer, ShellRunner
+    ├── Execution/           # CloneOrchestrator, LiveExecutor, ScriptRenderer, ShellRunner,
+    │                        #   ProgressReporter, PreflightChecker
     ├── Errors/              # PGSchemaEvoError enum
-    └── Config/              # YAML config file support
+    ├── Config/              # ConfigLoader (YAML parsing with env var interpolation)
+    └── Diff/                # SchemaDiffer (cross-database schema comparison)
 
 Tests/
 ├── PGSchemaEvoCoreTests/         # Unit tests (no database required)
