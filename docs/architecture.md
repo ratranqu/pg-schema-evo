@@ -92,6 +92,12 @@ RLS policies can be optionally cloned (`--rls` flag or `rls: true` in YAML). The
 | Conflict resolution | Interactive merge when target has diverged from source |
 | Performance | Parallel data transfer for independent tables, streaming COPY |
 | Observability | Structured JSON logging, OpenTelemetry traces for clone operations |
+| Migration tracking | Record applied diffs, maintain migration history and versioning |
+| Scheduled sync | Watch for schema changes and auto-sync on a schedule or continuously |
+| Multi-schema/multi-database | Batch operations across multiple schemas and databases |
+| Plugin/hook system | Pre/post-clone hooks for custom transformations |
+| Data masking | Mask or anonymize sensitive data during cloning |
+| Web UI/dashboard | Visual interface for managing clone jobs and monitoring operations |
 
 ## Subcommands
 
