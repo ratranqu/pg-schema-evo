@@ -165,14 +165,52 @@ jobs:
       - name: Merge coverage and check regression
         id: coverage
         run: |
-          # Merge LCOV files: take the max hit count for each line
-          apt-get update -qq && apt-get install -y -qq lcov bc > /dev/null 2>&1
+          apt-get update -qq && apt-get install -y -qq python3 bc > /dev/null 2>&1
 
-          lcov --add-tracefile coverage-unit.lcov \
-               --add-tracefile coverage-integration.lcov \
-               --output-file coverage-combined.lcov \
-               --ignore-errors inconsistent 2>/dev/null || \
-          cat coverage-unit.lcov coverage-integration.lcov > coverage-combined.lcov
+          # Merge LCOV files by taking max hit count per file+line.
+          # Simple concatenation double-counts lines, halving coverage.
+          python3 - coverage-unit.lcov coverage-integration.lcov coverage-combined.lcov <<'PYEOF'
+          import sys
+          from collections import defaultdict
+
+          unit_file, integ_file, out_file = sys.argv[1], sys.argv[2], sys.argv[3]
+          # Track max hit count per (source_file, line_number)
+          hits = defaultdict(int)  # (file, line) -> max_hits
+          files_seen = set()
+          current_file = None
+
+          for lcov_path in [unit_file, integ_file]:
+              try:
+                  with open(lcov_path) as f:
+                      for line in f:
+                          line = line.strip()
+                          if line.startswith('SF:'):
+                              current_file = line[3:]
+                              files_seen.add(current_file)
+                          elif line.startswith('DA:') and current_file:
+                              parts = line[3:].split(',')
+                              if len(parts) >= 2:
+                                  lineno = parts[0]
+                                  count = int(parts[1])
+                                  key = (current_file, lineno)
+                                  hits[key] = max(hits[key], count)
+                          elif line == 'end_of_record':
+                              current_file = None
+              except FileNotFoundError:
+                  pass
+
+          # Write merged LCOV
+          with open(out_file, 'w') as out:
+              for sf in sorted(files_seen):
+                  out.write(f'SF:{sf}\n')
+                  file_lines = sorted(
+                      [(k[1], v) for k, v in hits.items() if k[0] == sf],
+                      key=lambda x: int(x[0])
+                  )
+                  for lineno, count in file_lines:
+                      out.write(f'DA:{lineno},{count}\n')
+                  out.write('end_of_record\n')
+          PYEOF
 
           # Extract total line coverage from merged LCOV
           LINES_FOUND=$(grep -c '^DA:' coverage-combined.lcov || echo 0)
