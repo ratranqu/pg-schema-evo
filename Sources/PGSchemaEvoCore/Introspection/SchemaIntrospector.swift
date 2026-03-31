@@ -24,6 +24,9 @@ public protocol SchemaIntrospector: Sendable {
     /// Retrieve role metadata.
     func describeRole(_ id: ObjectIdentifier) async throws -> RoleMetadata
 
+    /// Retrieve composite type metadata.
+    func describeCompositeType(_ id: ObjectIdentifier) async throws -> CompositeTypeMetadata
+
     /// Retrieve extension metadata.
     func describeExtension(_ id: ObjectIdentifier) async throws -> ExtensionMetadata
 
@@ -38,4 +41,13 @@ public protocol SchemaIntrospector: Sendable {
 
     /// Resolve dependencies for an object via pg_depend.
     func dependencies(for id: ObjectIdentifier) async throws -> [ObjectIdentifier]
+
+    /// RLS policies for a table.
+    func rlsPolicies(for id: ObjectIdentifier) async throws -> RLSInfo
+
+    /// Partition info for a table (nil if not partitioned).
+    func partitionInfo(for id: ObjectIdentifier) async throws -> PartitionInfo?
+
+    /// List child partitions of a partitioned table.
+    func listPartitions(for id: ObjectIdentifier) async throws -> [PartitionChild]
 }

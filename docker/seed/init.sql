@@ -13,6 +13,17 @@ CREATE TYPE public.order_status AS ENUM ('pending', 'processing', 'shipped', 'de
 CREATE TYPE public.user_role AS ENUM ('admin', 'editor', 'viewer');
 
 -- ============================================================
+-- Composite Types
+-- ============================================================
+CREATE TYPE public.address AS (
+    street text,
+    city text,
+    state text,
+    zip_code text,
+    country text
+);
+
+-- ============================================================
 -- Tables
 -- ============================================================
 CREATE TABLE public.users (
@@ -159,3 +170,41 @@ INSERT INTO public.order_items (order_id, quantity, unit_price, product_id) VALU
 
 -- Refresh materialized view with data
 REFRESH MATERIALIZED VIEW analytics.daily_order_summary;
+
+-- ============================================================
+-- Partitioned Table (declarative)
+-- ============================================================
+CREATE TABLE public.events (
+    id integer GENERATED ALWAYS AS IDENTITY,
+    event_type text NOT NULL,
+    payload jsonb,
+    created_at timestamp with time zone NOT NULL DEFAULT now()
+) PARTITION BY RANGE (created_at);
+
+CREATE TABLE public.events_2025q1 PARTITION OF public.events
+    FOR VALUES FROM ('2025-01-01') TO ('2025-04-01');
+
+CREATE TABLE public.events_2025q2 PARTITION OF public.events
+    FOR VALUES FROM ('2025-04-01') TO ('2025-07-01');
+
+INSERT INTO public.events (event_type, payload, created_at) VALUES
+    ('login', '{"user": "alice"}', '2025-01-15 10:00:00+00'),
+    ('purchase', '{"amount": 99.99}', '2025-02-20 14:00:00+00'),
+    ('login', '{"user": "bob"}', '2025-05-01 09:00:00+00');
+
+-- ============================================================
+-- Row Level Security
+-- ============================================================
+ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY users_self_access ON public.users
+    AS PERMISSIVE
+    FOR SELECT
+    USING (username = current_user);
+
+CREATE POLICY users_admin_all ON public.users
+    AS PERMISSIVE
+    FOR ALL
+    TO postgres
+    USING (true)
+    WITH CHECK (true);

@@ -21,6 +21,9 @@ struct ListCommand: AsyncParsableCommand {
         var logger = Logger(label: "pg-schema-evo")
         logger.logLevel = .warning
 
+        guard !source.sourceDsn.isEmpty else {
+            throw ValidationError("--source-dsn is required")
+        }
         let sourceConfig = try ConnectionConfig.fromDSN(source.sourceDsn)
 
         let connection = try await PostgresConnectionHelper.connect(

@@ -49,13 +49,16 @@ public struct ScriptRenderer: Sendable {
             section += sectionHeader(number, "Create \(id.type.displayName): \(id)")
             section += wrapInPsql(sql, target: "$TARGET_DSN")
 
-        case .copyData(let id, let method, let estimatedSize):
+        case .copyData(let id, let method, let estimatedSize, let whereClause, let rowLimit):
             let sizeStr = estimatedSize.map { formatBytes($0) } ?? "unknown size"
-            section += sectionHeader(number, "Copy data: \(id) (estimated \(sizeStr), method: \(method.rawValue))")
+            var desc = "Copy data: \(id) (estimated \(sizeStr), method: \(method.rawValue))"
+            if let wh = whereClause { desc += " WHERE \(wh)" }
+            if let lim = rowLimit { desc += " LIMIT \(lim)" }
+            section += sectionHeader(number, desc)
 
             switch method {
             case .copy, .auto:
-                section += copyViaPsql(id)
+                section += copyViaPsql(id, whereClause: whereClause, rowLimit: rowLimit)
             case .pgDump:
                 section += copyViaPgDump(id)
             }
@@ -70,6 +73,14 @@ public struct ScriptRenderer: Sendable {
                 "REFRESH MATERIALIZED VIEW \(id.qualifiedName);",
                 target: "$TARGET_DSN"
             )
+
+        case .enableRLS(let sql, let id):
+            section += sectionHeader(number, "Enable RLS: \(id)")
+            section += wrapInPsql(sql, target: "$TARGET_DSN")
+
+        case .attachPartition(let sql, let id):
+            section += sectionHeader(number, "Attach partition: \(id)")
+            section += wrapInPsql(sql, target: "$TARGET_DSN")
         }
 
         return section
@@ -93,14 +104,27 @@ public struct ScriptRenderer: Sendable {
         """
     }
 
-    private func copyViaPsql(_ id: ObjectIdentifier) -> String {
-        """
-        psql "$SOURCE_DSN" \\
-          -c "\\copy \(id.qualifiedName) TO STDOUT WITH (FORMAT csv, HEADER)" \\
-        | psql "$TARGET_DSN" \\
-          -c "\\copy \(id.qualifiedName) FROM STDIN WITH (FORMAT csv, HEADER)"
+    private func copyViaPsql(_ id: ObjectIdentifier, whereClause: String? = nil, rowLimit: Int? = nil) -> String {
+        // When WHERE or LIMIT is specified, use SQL COPY with a subquery
+        if whereClause != nil || rowLimit != nil {
+            var query = "SELECT * FROM \(id.qualifiedName)"
+            if let wh = whereClause { query += " WHERE \(wh)" }
+            if let lim = rowLimit { query += " LIMIT \(lim)" }
+            return """
+                psql "$SOURCE_DSN" \\
+                  -c "\\copy (\(query)) TO STDOUT WITH (FORMAT csv, HEADER)" \\
+                | psql "$TARGET_DSN" \\
+                  -c "\\copy \(id.qualifiedName) FROM STDIN WITH (FORMAT csv, HEADER)"
 
-        """
+                """
+        }
+        return """
+            psql "$SOURCE_DSN" \\
+              -c "\\copy \(id.qualifiedName) TO STDOUT WITH (FORMAT csv, HEADER)" \\
+            | psql "$TARGET_DSN" \\
+              -c "\\copy \(id.qualifiedName) FROM STDIN WITH (FORMAT csv, HEADER)"
+
+            """
     }
 
     private func copyViaPgDump(_ id: ObjectIdentifier) -> String {
@@ -146,7 +170,9 @@ public struct ScriptRenderer: Sendable {
 public enum CloneStep: Sendable {
     case dropObject(ObjectIdentifier)
     case createObject(sql: String, id: ObjectIdentifier)
-    case copyData(id: ObjectIdentifier, method: TransferMethod, estimatedSize: Int?)
+    case copyData(id: ObjectIdentifier, method: TransferMethod, estimatedSize: Int?, whereClause: String? = nil, rowLimit: Int? = nil)
     case grantPermissions(sql: String, id: ObjectIdentifier)
     case refreshMaterializedView(ObjectIdentifier)
+    case enableRLS(sql: String, id: ObjectIdentifier)
+    case attachPartition(sql: String, id: ObjectIdentifier)
 }

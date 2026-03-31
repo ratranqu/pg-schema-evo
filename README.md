@@ -4,12 +4,21 @@ Selectively clone PostgreSQL database objects between clusters. Copy tables, vie
 
 ## Features
 
-- **Selective cloning** — Pick exactly which objects to copy: tables, views, sequences, enums, functions, and more
+- **Selective cloning** — Pick exactly which objects to copy: tables, views, sequences, enums, functions, composite types, and more
 - **Per-object control** — Choose whether to include data, permissions, and dependencies for each object
 - **Dry-run mode** — Preview the exact SQL and shell commands that would run, output as an executable bash script
+- **Live execution** — Execute directly against the target database with transaction wrapping and automatic retry
 - **Hybrid connectivity** — Uses PostgresNIO for fast schema introspection, shells out to `psql`/`pg_dump` for efficient data transfer
 - **Configurable data transfer** — Auto-selects between `COPY` (text, script-friendly) and `pg_dump` (binary, fast) based on table size
-- **YAML config files** — Define repeatable clone jobs in version-controlled config files
+- **YAML config files** — Define repeatable clone jobs in version-controlled config files with environment variable interpolation
+- **Dependency resolution** — Automatically discovers and orders dependencies via `pg_depend`, foreign keys, and view references
+- **Schema diffing** — Compare schemas between two databases and generate migration SQL
+- **Pre-flight validation** — Checks connectivity, object existence, and target conflicts before execution
+- **Selective data** — Filter rows with `WHERE` clauses and row limits per table or globally
+- **Partitioned tables** — Automatically clones parent tables with their partitions and bound specs
+- **Row-Level Security** — Optionally clone RLS policies and enable RLS on target tables
+- **Retry with rollback** — Transaction-wrapped execution with configurable retry and exponential backoff
+- **Shell completions** — Built-in completion scripts for bash, zsh, and fish
 
 ## Quick Start
 
@@ -28,6 +37,31 @@ pg-schema-evo clone \
   --object table:public.users \
   --data --permissions \
   --dry-run
+
+# Clone with a WHERE filter and row limit
+pg-schema-evo clone \
+  --source-dsn "..." --target-dsn "..." \
+  --object table:public.orders \
+  --data --where "orders:status = 'pending'" --row-limit 1000 \
+  --dry-run
+
+# Live execution (with auto-retry and confirmation prompt)
+pg-schema-evo clone \
+  --source-dsn "..." --target-dsn "..." \
+  --object table:public.users \
+  --data --cascade
+
+# Use a YAML config file
+pg-schema-evo clone --config clone-job.yaml
+
+# Compare schemas between two databases
+pg-schema-evo diff \
+  --source-dsn "postgresql://user:pass@prod:5432/mydb" \
+  --target-dsn "postgresql://admin:pass@localhost:5432/mydb_dev" \
+  --schema public
+
+# Pre-flight validation
+pg-schema-evo check --config clone-job.yaml
 
 # List all tables in a schema
 pg-schema-evo list \
@@ -50,9 +84,66 @@ view:public.active_users
 matview:analytics.daily_stats
 function:public.calculate_total(integer)
 enum:public.order_status
+composite:public.address
 sequence:public.invoice_number_seq
 role:readonly_role
 extension:pgcrypto
+```
+
+## YAML Config Files
+
+Define repeatable clone jobs with version-controlled config files:
+
+```yaml
+source:
+  host: ${SOURCE_HOST:-prod-db}
+  database: myapp
+  username: ${SOURCE_USER:-readonly}
+  password: ${SOURCE_PASSWORD}
+target:
+  host: localhost
+  database: myapp_dev
+  username: admin
+objects:
+  - type: table
+    schema: public
+    name: users
+    data: true
+    permissions: true
+    rls: true
+  - type: table
+    schema: public
+    name: orders
+    data: true
+    where: "status = 'pending'"
+    row_limit: 1000
+cascade: true
+dry_run: false
+```
+
+## Docker
+
+```bash
+# Build the Docker image
+docker build -t pg-schema-evo .
+
+# Run with Docker
+docker run --rm pg-schema-evo clone \
+  --source-dsn "..." --target-dsn "..." \
+  --object table:public.users --dry-run
+```
+
+## Shell Completions
+
+```bash
+# Bash
+pg-schema-evo --generate-completion-script bash > /etc/bash_completion.d/pg-schema-evo
+
+# Zsh
+pg-schema-evo --generate-completion-script zsh > ~/.zfunc/_pg-schema-evo
+
+# Fish
+pg-schema-evo --generate-completion-script fish > ~/.config/fish/completions/pg-schema-evo.fish
 ```
 
 ## Building
@@ -91,10 +182,32 @@ Stop the databases:
 docker compose -f docker/docker-compose.yml down
 ```
 
+### Code Coverage
+
+Coverage is collected from both unit and integration tests in CI, merged into a combined report. Pull requests that reduce line coverage by more than 1% will fail the coverage check.
+
+Generate a coverage report locally:
+
+```bash
+swift test --enable-code-coverage
+BIN=$(swift build --show-bin-path)
+llvm-cov report \
+  -instr-profile="$(find .build -name default.profdata)" \
+  "$(find "$BIN" -name 'pg-schema-evoPackageTests' -o -name '*.xctest' | head -1)" \
+  -ignore-filename-regex='Tests/|\.build/'
+```
+
+| Metric | Target |
+|--------|--------|
+| Line coverage | Maintained (max 1% regression per PR) |
+| Test suites | 16 suites, 94 tests (unit + integration) |
+
 ## Documentation
 
 - [Getting Started Guide](docs/getting-started.md)
+- [Architecture](docs/architecture.md)
+- [Detailed Architecture](ARCHITECTURE.md)
 
 ## Status
 
-Phase 1 (MVP) — Table DDL cloning with dry-run mode. See the [implementation plan](docs/architecture.md) for the full roadmap.
+Version 0.2.0 — All core features implemented: selective cloning with dry-run and live modes, dependency resolution, schema diffing, YAML config files, partitioned tables, RLS policies, selective data filters, pre-flight validation, and retry with rollback.

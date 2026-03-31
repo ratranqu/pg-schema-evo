@@ -71,6 +71,9 @@ private final class MockIntrospector: SchemaIntrospector, @unchecked Sendable {
     func describeRole(_ id: ObjectIdentifier) async throws -> RoleMetadata {
         throw PGSchemaEvoError.objectNotFound(id)
     }
+    func describeCompositeType(_ id: ObjectIdentifier) async throws -> CompositeTypeMetadata {
+        throw PGSchemaEvoError.objectNotFound(id)
+    }
     func describeExtension(_ id: ObjectIdentifier) async throws -> ExtensionMetadata {
         throw PGSchemaEvoError.objectNotFound(id)
     }
@@ -78,4 +81,7 @@ private final class MockIntrospector: SchemaIntrospector, @unchecked Sendable {
     func listObjects(schema: String?, types: [ObjectType]?) async throws -> [ObjectIdentifier] { [] }
     func permissions(for id: ObjectIdentifier) async throws -> [PermissionGrant] { [] }
     func dependencies(for id: ObjectIdentifier) async throws -> [ObjectIdentifier] { [] }
+    func rlsPolicies(for id: ObjectIdentifier) async throws -> RLSInfo { RLSInfo() }
+    func partitionInfo(for id: ObjectIdentifier) async throws -> PartitionInfo? { nil }
+    func listPartitions(for id: ObjectIdentifier) async throws -> [PartitionChild] { [] }
 }

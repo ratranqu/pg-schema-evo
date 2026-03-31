@@ -1,3 +1,4 @@
+import Foundation
 import PostgresNIO
 import Logging
 
@@ -344,6 +345,47 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
         return roles
     }
 
+    // MARK: - Composite Type
+
+    public func describeCompositeType(_ id: ObjectIdentifier) async throws -> CompositeTypeMetadata {
+        guard let schema = id.schema else {
+            throw PGSchemaEvoError.invalidObjectSpec("Composite type requires a schema: \(id)")
+        }
+
+        let query: PostgresQuery = """
+            SELECT
+                a.attname AS attr_name,
+                pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+                a.attnum::integer AS ordinal_position
+            FROM pg_catalog.pg_type t
+            JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+            JOIN pg_catalog.pg_attribute a ON a.attrelid = t.typrelid
+            WHERE n.nspname = \(schema)
+              AND t.typname = \(id.name)
+              AND t.typtype = 'c'
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+            ORDER BY a.attnum
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        var attributes: [CompositeTypeAttribute] = []
+        for try await row in rows {
+            let (name, dataType, position) = try row.decode((String, String, Int).self)
+            attributes.append(CompositeTypeAttribute(
+                name: name,
+                dataType: dataType,
+                ordinalPosition: position
+            ))
+        }
+
+        guard !attributes.isEmpty else {
+            throw PGSchemaEvoError.objectNotFound(id)
+        }
+
+        return CompositeTypeMetadata(id: id, attributes: attributes)
+    }
+
     // MARK: - Extension
 
     public func describeExtension(_ id: ObjectIdentifier) async throws -> ExtensionMetadata {
@@ -420,7 +462,9 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
                 try await results.append(contentsOf: listRelations(schema: schema, relkind: "f", type: .foreignTable))
             case .foreignDataWrapper:
                 try await results.append(contentsOf: listForeignDataWrappers())
-            case .operator, .compositeType:
+            case .compositeType:
+                try await results.append(contentsOf: listCompositeTypes(schema: schema))
+            case .operator:
                 logger.debug("Listing not yet implemented for type: \(type.displayName)")
             }
         }
@@ -509,6 +553,43 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
             WHERE n.nspname = \(schema)
               AND c.relname = \(id.name)
               AND d.deptype IN ('n', 'a')
+              AND dep_ns.nspname NOT IN ('pg_catalog', 'information_schema')
+            UNION
+            SELECT DISTINCT
+                'table' AS dep_type,
+                ref_ns.nspname AS dep_schema,
+                ref_c.relname AS dep_name
+            FROM pg_catalog.pg_constraint con
+            JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_catalog.pg_class ref_c ON ref_c.oid = con.confrelid
+            JOIN pg_catalog.pg_namespace ref_ns ON ref_ns.oid = ref_c.relnamespace
+            WHERE n.nspname = \(schema)
+              AND c.relname = \(id.name)
+              AND con.contype = 'f'
+              AND ref_c.relname != \(id.name)
+              AND ref_ns.nspname NOT IN ('pg_catalog', 'information_schema')
+            UNION
+            SELECT DISTINCT
+                CASE dep_c.relkind
+                    WHEN 'r' THEN 'table'
+                    WHEN 'v' THEN 'view'
+                    WHEN 'm' THEN 'matview'
+                    WHEN 'S' THEN 'sequence'
+                    WHEN 'f' THEN 'foreign_table'
+                    ELSE 'table'
+                END AS dep_type,
+                dep_ns.nspname AS dep_schema,
+                dep_c.relname AS dep_name
+            FROM pg_catalog.pg_depend d
+            JOIN pg_catalog.pg_rewrite rw ON rw.oid = d.objid
+            JOIN pg_catalog.pg_class c ON c.oid = rw.ev_class
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_catalog.pg_class dep_c ON dep_c.oid = d.refobjid
+            JOIN pg_catalog.pg_namespace dep_ns ON dep_ns.oid = dep_c.relnamespace
+            WHERE n.nspname = \(schema)
+              AND c.relname = \(id.name)
+              AND dep_c.relname != \(id.name)
               AND dep_ns.nspname NOT IN ('pg_catalog', 'information_schema')
             """
 
@@ -677,6 +758,46 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
         return results
     }
 
+    private func listCompositeTypes(schema: String?) async throws -> [ObjectIdentifier] {
+        var results: [ObjectIdentifier] = []
+
+        let query: PostgresQuery
+        if let schema {
+            query = """
+                SELECT n.nspname, t.typname
+                FROM pg_catalog.pg_type t
+                JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+                WHERE t.typtype = 'c'
+                  AND n.nspname = \(schema)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM pg_catalog.pg_class c
+                      WHERE c.oid = t.typrelid AND c.relkind != 'c'
+                  )
+                ORDER BY n.nspname, t.typname
+                """
+        } else {
+            query = """
+                SELECT n.nspname, t.typname
+                FROM pg_catalog.pg_type t
+                JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+                WHERE t.typtype = 'c'
+                  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM pg_catalog.pg_class c
+                      WHERE c.oid = t.typrelid AND c.relkind != 'c'
+                  )
+                ORDER BY n.nspname, t.typname
+                """
+        }
+
+        let rows = try await connection.query(query, logger: logger)
+        for try await row in rows {
+            let (schemaName, name) = try row.decode((String, String).self)
+            results.append(ObjectIdentifier(type: .compositeType, schema: schemaName, name: name))
+        }
+        return results
+    }
+
     private func listForeignDataWrappers() async throws -> [ObjectIdentifier] {
         let query: PostgresQuery = """
             SELECT fdwname
@@ -691,6 +812,153 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
             results.append(ObjectIdentifier(type: .foreignDataWrapper, name: name))
         }
         return results
+    }
+
+    // MARK: - RLS Policies
+
+    public func rlsPolicies(for id: ObjectIdentifier) async throws -> RLSInfo {
+        guard let schema = id.schema else { return RLSInfo() }
+
+        // Check if RLS is enabled
+        let rlsQuery: PostgresQuery = """
+            SELECT c.relrowsecurity, c.relforcerowsecurity
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = \(schema)
+              AND c.relname = \(id.name)
+            """
+
+        let rlsRows = try await connection.query(rlsQuery, logger: logger)
+        var isEnabled = false
+        var isForced = false
+        for try await row in rlsRows {
+            let (enabled, forced) = try row.decode((Bool, Bool).self)
+            isEnabled = enabled
+            isForced = forced
+        }
+
+        // Get policies
+        let policyQuery: PostgresQuery = """
+            SELECT
+                pol.polname AS policy_name,
+                pg_catalog.pg_get_expr(pol.polqual, pol.polrelid, true) AS policy_qual,
+                pol.polcmd AS command,
+                pol.polpermissive AS permissive,
+                ARRAY(
+                    SELECT r.rolname FROM pg_catalog.pg_roles r
+                    WHERE r.oid = ANY(pol.polroles)
+                )::text[] AS roles,
+                pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid, true) AS with_check
+            FROM pg_catalog.pg_policy pol
+            JOIN pg_catalog.pg_class c ON c.oid = pol.polrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = \(schema)
+              AND c.relname = \(id.name)
+            ORDER BY pol.polname
+            """
+
+        let policyRows = try await connection.query(policyQuery, logger: logger)
+        var policies: [RLSPolicy] = []
+        for try await row in policyRows {
+            let randomAccess = row.makeRandomAccess()
+            let name = try randomAccess[0].decode(String.self)
+            let qual = try randomAccess[1].decode(String?.self)
+            let cmd = try randomAccess[2].decode(String.self)
+            let permissive = try randomAccess[3].decode(Bool.self)
+            let roles = try randomAccess[4].decode(String.self) // Array as string
+            let withCheck = try randomAccess[5].decode(String?.self)
+
+            let cmdStr: String
+            switch cmd {
+            case "r": cmdStr = "SELECT"
+            case "a": cmdStr = "INSERT"
+            case "w": cmdStr = "UPDATE"
+            case "d": cmdStr = "DELETE"
+            default: cmdStr = "ALL"
+            }
+
+            let permStr = permissive ? "PERMISSIVE" : "RESTRICTIVE"
+
+            var definition = "CREATE POLICY \(quoteIdent(name)) ON \(id.qualifiedName)"
+            definition += " AS \(permStr)"
+            definition += " FOR \(cmdStr)"
+            // Parse roles from the array string
+            let rolesClean = roles.trimmingCharacters(in: CharacterSet(charactersIn: "{}"))
+            if !rolesClean.isEmpty && rolesClean != "{}" {
+                definition += " TO \(rolesClean)"
+            }
+            if let q = qual {
+                definition += "\n    USING (\(q))"
+            }
+            if let wc = withCheck {
+                definition += "\n    WITH CHECK (\(wc))"
+            }
+            definition += ";"
+
+            policies.append(RLSPolicy(name: name, definition: definition))
+        }
+
+        return RLSInfo(isEnabled: isEnabled, isForced: isForced, policies: policies)
+    }
+
+    // MARK: - Partition Info
+
+    public func partitionInfo(for id: ObjectIdentifier) async throws -> PartitionInfo? {
+        guard let schema = id.schema else { return nil }
+
+        let query: PostgresQuery = """
+            SELECT
+                CASE pt.partstrat
+                    WHEN 'r' THEN 'RANGE'
+                    WHEN 'l' THEN 'LIST'
+                    WHEN 'h' THEN 'HASH'
+                END AS strategy,
+                pg_catalog.pg_get_partkeydef(c.oid) AS partition_key
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_catalog.pg_partitioned_table pt ON pt.partrelid = c.oid
+            WHERE n.nspname = \(schema)
+              AND c.relname = \(id.name)
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        for try await row in rows {
+            let (strategy, partKey) = try row.decode((String, String).self)
+            return PartitionInfo(strategy: strategy, partitionKey: partKey)
+        }
+        return nil
+    }
+
+    public func listPartitions(for id: ObjectIdentifier) async throws -> [PartitionChild] {
+        guard let schema = id.schema else { return [] }
+
+        let query: PostgresQuery = """
+            SELECT
+                child_ns.nspname AS child_schema,
+                child_c.relname AS child_name,
+                pg_catalog.pg_get_expr(child_c.relpartbound, child_c.oid) AS bound_spec
+            FROM pg_catalog.pg_inherits inh
+            JOIN pg_catalog.pg_class parent_c ON parent_c.oid = inh.inhparent
+            JOIN pg_catalog.pg_namespace parent_ns ON parent_ns.oid = parent_c.relnamespace
+            JOIN pg_catalog.pg_class child_c ON child_c.oid = inh.inhrelid
+            JOIN pg_catalog.pg_namespace child_ns ON child_ns.oid = child_c.relnamespace
+            WHERE parent_ns.nspname = \(schema)
+              AND parent_c.relname = \(id.name)
+            ORDER BY child_c.relname
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        var partitions: [PartitionChild] = []
+        for try await row in rows {
+            let (childSchema, childName, boundSpec) = try row.decode((String, String, String).self)
+            let childId = ObjectIdentifier(type: .table, schema: childSchema, name: childName)
+            partitions.append(PartitionChild(id: childId, boundSpec: boundSpec))
+        }
+        return partitions
+    }
+
+    private func quoteIdent(_ ident: String) -> String {
+        "\"\(ident.replacingOccurrences(of: "\"", with: "\"\""))\""
     }
 
     // MARK: - Private column/constraint/index/trigger query helpers

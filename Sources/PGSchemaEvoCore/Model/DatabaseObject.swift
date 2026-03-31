@@ -106,17 +106,29 @@ public struct ObjectSpec: Sendable, Codable {
     public var copyPermissions: Bool
     public var copyData: Bool
     public var cascadeDependencies: Bool
+    /// Optional WHERE clause for filtering rows (tables only).
+    public var whereClause: String?
+    /// Optional row limit for data copy.
+    public var rowLimit: Int?
+    /// Whether to clone RLS policies for this object.
+    public var copyRLSPolicies: Bool
 
     public init(
         id: ObjectIdentifier,
         copyPermissions: Bool = false,
         copyData: Bool = false,
-        cascadeDependencies: Bool = false
+        cascadeDependencies: Bool = false,
+        whereClause: String? = nil,
+        rowLimit: Int? = nil,
+        copyRLSPolicies: Bool = false
     ) {
         self.id = id
         self.copyPermissions = copyPermissions
         self.copyData = copyData
         self.cascadeDependencies = cascadeDependencies
+        self.whereClause = whereClause
+        self.rowLimit = rowLimit
+        self.copyRLSPolicies = copyRLSPolicies
     }
 }
 
