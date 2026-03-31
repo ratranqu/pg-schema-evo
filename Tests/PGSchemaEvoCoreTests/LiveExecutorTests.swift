@@ -200,4 +200,29 @@ struct LiveExecutorTests {
         let script = executor.buildTransactionScript(steps: steps, prefetchedData: [:])
         #expect(script.contains("DROP FUNCTION IF EXISTS \(qn(schema: "public", name: "my_func"))(integer, text) CASCADE;"))
     }
+
+    @Test("ALTER step is included in transaction script")
+    func alterStep() {
+        let executor = makeExecutor()
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "users")
+        let alterSQL = "ALTER TABLE \(qn(schema: "public", name: "users")) ADD COLUMN email text;"
+        let steps: [CloneStep] = [.alterObject(sql: alterSQL, id: id)]
+        let script = executor.buildTransactionScript(steps: steps, prefetchedData: [:])
+        #expect(script.contains("BEGIN;"))
+        #expect(script.contains("ALTER TABLE"))
+        #expect(script.contains("ADD COLUMN email text;"))
+        #expect(script.contains("COMMIT;"))
+    }
+
+    @Test("ALTER step description")
+    func alterStepDescription() {
+        let executor = makeExecutor()
+        let id = ObjectIdentifier(type: .sequence, schema: "public", name: "my_seq")
+        let steps: [CloneStep] = [
+            .alterObject(sql: "ALTER SEQUENCE \(qn(schema: "public", name: "my_seq")) INCREMENT BY 5;", id: id),
+        ]
+        let script = executor.buildTransactionScript(steps: steps, prefetchedData: [:])
+        #expect(script.contains("Alter"))
+        #expect(script.contains("INCREMENT BY 5"))
+    }
 }

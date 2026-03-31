@@ -105,6 +105,24 @@ The `diff` subcommand compares metadata between source and target databases usin
 
 Output can be rendered as a text summary or as migration SQL (`--sql` flag).
 
+`SchemaDiffer` compares all major object types: tables (columns, constraints,
+indexes), views, materialized views, sequences, enums, functions/procedures,
+composite types, schemas, roles, and extensions.
+
+## Incremental Sync
+
+The `sync` subcommand builds on `SchemaDiffer` to apply only the necessary changes
+to bring a target database in sync with the source. It:
+
+1. Runs a diff between source and target for the requested objects
+2. Generates `CREATE` steps for objects only in source
+3. Generates `ALTER` steps for modified objects (using migration SQL from the diff)
+4. Optionally generates `DROP` steps for objects only in target (`--drop-extra`)
+5. Executes all steps in a single transaction (same as `clone`)
+
+The `sync` command supports both specific object targeting (`--object`) and
+broad filtering (`--sync-all --type table --schema public`).
+
 ## Pre-flight Validation
 
 Before live execution, `PreflightChecker` validates:
@@ -175,15 +193,16 @@ so they don't interfere with dry-run mode or other subcommands.
 ```
 Sources/
 ├── PGSchemaEvoCLI/          # CLI entry point and argument parsing
-│   ├── Commands/            # clone, diff, check, inspect, list subcommands
+│   ├── Commands/            # clone, sync, diff, check, inspect, list subcommands
 │   └── Options/             # @OptionGroup structs (connection, transfer, objects)
 └── PGSchemaEvoCore/         # Core library
     ├── Model/               # Data types (ObjectIdentifier, CloneJob, metadata)
     ├── Introspection/       # PGCatalogIntrospector, PgDumpIntrospector
     ├── SQLGen/              # DDL generators per object type
     ├── Dependencies/        # DependencyResolver with topological sort
-    ├── Execution/           # CloneOrchestrator, LiveExecutor, ScriptRenderer, ShellRunner,
-    │                        #   ProgressReporter, PreflightChecker, SignalHandler
+    ├── Execution/           # CloneOrchestrator, SyncOrchestrator, LiveExecutor,
+    │                        #   ScriptRenderer, ShellRunner, ProgressReporter,
+    │                        #   PreflightChecker, SignalHandler
     ├── Errors/              # PGSchemaEvoError enum
     ├── Config/              # ConfigLoader (YAML parsing with env var interpolation)
     └── Diff/                # SchemaDiffer (cross-database schema comparison)

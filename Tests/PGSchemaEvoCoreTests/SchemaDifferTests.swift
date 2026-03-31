@@ -639,16 +639,16 @@ struct SchemaDifferTests {
         #expect(result.modified.isEmpty)
     }
 
-    @Test("compareObject returns nil for unsupported types like schema")
+    @Test("compareObject returns nil for unsupported types like aggregate")
     func unsupportedTypeReturnsNil() async throws {
-        let schemaId = ObjectIdentifier(type: .schema, name: "custom_schema")
-        let source = ConfigurableDiffIntrospector(objects: [schemaId])
-        let target = ConfigurableDiffIntrospector(objects: [schemaId])
+        let aggId = ObjectIdentifier(type: .aggregate, schema: "public", name: "my_agg")
+        let source = ConfigurableDiffIntrospector(objects: [aggId])
+        let target = ConfigurableDiffIntrospector(objects: [aggId])
 
         let differ = SchemaDiffer(logger: Logger(label: "test"))
         let result = try await differ.diff(source: source, target: target)
 
-        // Schema type goes through default branch which returns nil, so no modifications
+        // Aggregate type goes through default branch which returns nil, so no modifications
         #expect(result.modified.isEmpty)
         #expect(result.matching == 1)
     }
@@ -781,6 +781,205 @@ struct SchemaDifferTests {
         // Should detect: id type change, price nullability change, price default change, sku missing
         #expect(result.modified[0].differences.count >= 3)
     }
+
+    // MARK: - Composite Type Diffs
+
+    @Test("Composite type diff detects attribute type change")
+    func compositeTypeAttrTypeChange() async throws {
+        let typeId = ObjectIdentifier(type: .compositeType, schema: "public", name: "address")
+        let source = ConfigurableDiffIntrospector(objects: [typeId])
+        source.compositeTypes[typeId] = CompositeTypeMetadata(id: typeId, attributes: [
+            CompositeTypeAttribute(name: "street", dataType: "text", ordinalPosition: 1),
+            CompositeTypeAttribute(name: "zip", dataType: "varchar(10)", ordinalPosition: 2),
+        ])
+        let target = ConfigurableDiffIntrospector(objects: [typeId])
+        target.compositeTypes[typeId] = CompositeTypeMetadata(id: typeId, attributes: [
+            CompositeTypeAttribute(name: "street", dataType: "text", ordinalPosition: 1),
+            CompositeTypeAttribute(name: "zip", dataType: "varchar(5)", ordinalPosition: 2),
+        ])
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].differences[0].contains("zip"))
+        #expect(result.modified[0].migrationSQL[0].contains("ALTER TYPE"))
+    }
+
+    @Test("Composite type diff detects missing attribute")
+    func compositeTypeMissingAttr() async throws {
+        let typeId = ObjectIdentifier(type: .compositeType, schema: "public", name: "address")
+        let source = ConfigurableDiffIntrospector(objects: [typeId])
+        source.compositeTypes[typeId] = CompositeTypeMetadata(id: typeId, attributes: [
+            CompositeTypeAttribute(name: "street", dataType: "text", ordinalPosition: 1),
+            CompositeTypeAttribute(name: "city", dataType: "text", ordinalPosition: 2),
+        ])
+        let target = ConfigurableDiffIntrospector(objects: [typeId])
+        target.compositeTypes[typeId] = CompositeTypeMetadata(id: typeId, attributes: [
+            CompositeTypeAttribute(name: "street", dataType: "text", ordinalPosition: 1),
+        ])
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].differences[0].contains("city"))
+        #expect(result.modified[0].migrationSQL[0].contains("ADD ATTRIBUTE"))
+    }
+
+    @Test("Composite type diff detects extra attribute in target")
+    func compositeTypeExtraAttr() async throws {
+        let typeId = ObjectIdentifier(type: .compositeType, schema: "public", name: "address")
+        let source = ConfigurableDiffIntrospector(objects: [typeId])
+        source.compositeTypes[typeId] = CompositeTypeMetadata(id: typeId, attributes: [
+            CompositeTypeAttribute(name: "street", dataType: "text", ordinalPosition: 1),
+        ])
+        let target = ConfigurableDiffIntrospector(objects: [typeId])
+        target.compositeTypes[typeId] = CompositeTypeMetadata(id: typeId, attributes: [
+            CompositeTypeAttribute(name: "street", dataType: "text", ordinalPosition: 1),
+            CompositeTypeAttribute(name: "obsolete", dataType: "text", ordinalPosition: 2),
+        ])
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].migrationSQL[0].contains("DROP ATTRIBUTE"))
+    }
+
+    @Test("Composite type identical produces no diff")
+    func compositeTypeIdentical() async throws {
+        let typeId = ObjectIdentifier(type: .compositeType, schema: "public", name: "address")
+        let source = ConfigurableDiffIntrospector(objects: [typeId])
+        source.compositeTypes[typeId] = CompositeTypeMetadata(id: typeId, attributes: [
+            CompositeTypeAttribute(name: "street", dataType: "text", ordinalPosition: 1),
+        ])
+        let target = ConfigurableDiffIntrospector(objects: [typeId])
+        target.compositeTypes[typeId] = CompositeTypeMetadata(id: typeId, attributes: [
+            CompositeTypeAttribute(name: "street", dataType: "text", ordinalPosition: 1),
+        ])
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.isEmpty)
+    }
+
+    // MARK: - Schema Diffs
+
+    @Test("Schema diff detects owner change")
+    func schemaOwnerChange() async throws {
+        let schemaId = ObjectIdentifier(type: .schema, schema: nil, name: "myschema")
+        let source = ConfigurableDiffIntrospector(objects: [schemaId])
+        source.schemas[schemaId] = SchemaMetadata(id: schemaId, owner: "admin")
+        let target = ConfigurableDiffIntrospector(objects: [schemaId])
+        target.schemas[schemaId] = SchemaMetadata(id: schemaId, owner: "postgres")
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].migrationSQL[0].contains("ALTER SCHEMA"))
+        #expect(result.modified[0].migrationSQL[0].contains("OWNER TO"))
+    }
+
+    @Test("Schema identical produces no diff")
+    func schemaIdentical() async throws {
+        let schemaId = ObjectIdentifier(type: .schema, schema: nil, name: "myschema")
+        let source = ConfigurableDiffIntrospector(objects: [schemaId])
+        source.schemas[schemaId] = SchemaMetadata(id: schemaId, owner: "postgres")
+        let target = ConfigurableDiffIntrospector(objects: [schemaId])
+        target.schemas[schemaId] = SchemaMetadata(id: schemaId, owner: "postgres")
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.isEmpty)
+    }
+
+    // MARK: - Role Diffs
+
+    @Test("Role diff detects attribute changes")
+    func roleAttrChanges() async throws {
+        let roleId = ObjectIdentifier(type: .role, schema: nil, name: "app_user")
+        let source = ConfigurableDiffIntrospector(objects: [roleId])
+        source.roles[roleId] = RoleMetadata(id: roleId, canLogin: true, canCreateDB: true)
+        let target = ConfigurableDiffIntrospector(objects: [roleId])
+        target.roles[roleId] = RoleMetadata(id: roleId, canLogin: false, canCreateDB: false)
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].differences.count == 2)
+        let sql = result.modified[0].migrationSQL[0]
+        #expect(sql.contains("ALTER ROLE"))
+        #expect(sql.contains("LOGIN"))
+        #expect(sql.contains("CREATEDB"))
+    }
+
+    @Test("Role diff detects membership changes")
+    func roleMembershipChanges() async throws {
+        let roleId = ObjectIdentifier(type: .role, schema: nil, name: "app_user")
+        let source = ConfigurableDiffIntrospector(objects: [roleId])
+        source.roles[roleId] = RoleMetadata(id: roleId, memberOf: ["readers", "writers"])
+        let target = ConfigurableDiffIntrospector(objects: [roleId])
+        target.roles[roleId] = RoleMetadata(id: roleId, memberOf: ["readers", "admins"])
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        let sqlJoined = result.modified[0].migrationSQL.joined(separator: " ")
+        #expect(sqlJoined.contains("GRANT"))
+        #expect(sqlJoined.contains("REVOKE"))
+    }
+
+    @Test("Role identical produces no diff")
+    func roleIdentical() async throws {
+        let roleId = ObjectIdentifier(type: .role, schema: nil, name: "app_user")
+        let source = ConfigurableDiffIntrospector(objects: [roleId])
+        source.roles[roleId] = RoleMetadata(id: roleId, canLogin: true, memberOf: ["readers"])
+        let target = ConfigurableDiffIntrospector(objects: [roleId])
+        target.roles[roleId] = RoleMetadata(id: roleId, canLogin: true, memberOf: ["readers"])
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.isEmpty)
+    }
+
+    // MARK: - Extension Diffs
+
+    @Test("Extension diff detects version change")
+    func extensionVersionChange() async throws {
+        let extId = ObjectIdentifier(type: .extension, schema: nil, name: "uuid-ossp")
+        let source = ConfigurableDiffIntrospector(objects: [extId])
+        source.extensions[extId] = ExtensionMetadata(id: extId, version: "1.2")
+        let target = ConfigurableDiffIntrospector(objects: [extId])
+        target.extensions[extId] = ExtensionMetadata(id: extId, version: "1.1")
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].migrationSQL[0].contains("ALTER EXTENSION"))
+        #expect(result.modified[0].migrationSQL[0].contains("UPDATE TO"))
+    }
+
+    @Test("Extension identical produces no diff")
+    func extensionIdentical() async throws {
+        let extId = ObjectIdentifier(type: .extension, schema: nil, name: "uuid-ossp")
+        let source = ConfigurableDiffIntrospector(objects: [extId])
+        source.extensions[extId] = ExtensionMetadata(id: extId, version: "1.1")
+        let target = ConfigurableDiffIntrospector(objects: [extId])
+        target.extensions[extId] = ExtensionMetadata(id: extId, version: "1.1")
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.isEmpty)
+    }
 }
 
 /// Mock introspector for diff tests that returns canned object lists.
@@ -911,17 +1110,34 @@ private final class ConfigurableDiffIntrospector: SchemaIntrospector, @unchecked
         return meta
     }
 
+    var schemas: [ObjectIdentifier: SchemaMetadata] = [:]
+    var roles: [ObjectIdentifier: RoleMetadata] = [:]
+    var compositeTypes: [ObjectIdentifier: CompositeTypeMetadata] = [:]
+    var extensions: [ObjectIdentifier: ExtensionMetadata] = [:]
+
     func describeSchema(_ id: ObjectIdentifier) async throws -> SchemaMetadata {
-        throw PGSchemaEvoError.objectNotFound(id)
+        guard let meta = schemas[id] else {
+            throw PGSchemaEvoError.objectNotFound(id)
+        }
+        return meta
     }
     func describeRole(_ id: ObjectIdentifier) async throws -> RoleMetadata {
-        throw PGSchemaEvoError.objectNotFound(id)
+        guard let meta = roles[id] else {
+            throw PGSchemaEvoError.objectNotFound(id)
+        }
+        return meta
     }
     func describeCompositeType(_ id: ObjectIdentifier) async throws -> CompositeTypeMetadata {
-        throw PGSchemaEvoError.objectNotFound(id)
+        guard let meta = compositeTypes[id] else {
+            throw PGSchemaEvoError.objectNotFound(id)
+        }
+        return meta
     }
     func describeExtension(_ id: ObjectIdentifier) async throws -> ExtensionMetadata {
-        throw PGSchemaEvoError.objectNotFound(id)
+        guard let meta = extensions[id] else {
+            throw PGSchemaEvoError.objectNotFound(id)
+        }
+        return meta
     }
     func relationSize(_ id: ObjectIdentifier) async throws -> Int? { nil }
     func permissions(for id: ObjectIdentifier) async throws -> [PermissionGrant] { [] }
