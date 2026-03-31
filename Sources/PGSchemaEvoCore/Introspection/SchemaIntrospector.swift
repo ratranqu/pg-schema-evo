@@ -50,4 +50,7 @@ public protocol SchemaIntrospector: Sendable {
 
     /// List child partitions of a partitioned table.
     func listPartitions(for id: ObjectIdentifier) async throws -> [PartitionChild]
+
+    /// Return the ordered column names that form the primary key of a table.
+    func primaryKeyColumns(for id: ObjectIdentifier) async throws -> [String]
 }

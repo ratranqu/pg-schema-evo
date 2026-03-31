@@ -20,6 +20,7 @@ struct PGSchemaEvo: AsyncParsableCommand {
         subcommands: [
             CloneCommand.self,
             SyncCommand.self,
+            DataSyncCommand.self,
             DiffCommand.self,
             CheckCommand.self,
             InspectCommand.self,

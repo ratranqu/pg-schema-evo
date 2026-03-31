@@ -957,6 +957,35 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
         return partitions
     }
 
+    // MARK: - Primary Key Columns
+
+    public func primaryKeyColumns(for id: ObjectIdentifier) async throws -> [String] {
+        guard let schema = id.schema else {
+            throw PGSchemaEvoError.invalidObjectSpec("Table requires a schema: \(id)")
+        }
+
+        let query: PostgresQuery = """
+            SELECT a.attname
+            FROM pg_catalog.pg_index i
+            JOIN pg_catalog.pg_attribute a
+              ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+            JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = \(schema)
+              AND c.relname = \(id.name)
+              AND i.indisprimary
+            ORDER BY array_position(i.indkey, a.attnum)
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        var columns: [String] = []
+        for try await row in rows {
+            let name = try row.decode(String.self)
+            columns.append(name)
+        }
+        return columns
+    }
+
     private func quoteIdent(_ ident: String) -> String {
         "\"\(ident.replacingOccurrences(of: "\"", with: "\"\""))\""
     }
