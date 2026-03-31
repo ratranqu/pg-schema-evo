@@ -219,6 +219,16 @@ jobs:
         run: |
           apt-get update -qq && apt-get install -y -qq bc > /dev/null 2>&1
           CURRENT="${{ steps.coverage.outputs.line_coverage }}"
+          MINIMUM="70.0"
+
+          # Check minimum coverage threshold
+          BELOW_MIN=$(echo "$CURRENT < $MINIMUM" | bc)
+          if [ "$BELOW_MIN" = "1" ]; then
+            echo "::error::Coverage is ${CURRENT}%, below the minimum threshold of ${MINIMUM}%."
+            exit 1
+          fi
+
+          # Check regression from baseline
           if [ -f coverage-baseline.txt ]; then
             BASELINE=$(cat coverage-baseline.txt)
             echo "Baseline coverage (main): ${BASELINE}%"
