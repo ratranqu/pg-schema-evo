@@ -3,12 +3,23 @@ import Foundation
 import Glibc
 #endif
 
+/// No-op signal handler used to intercept signals without ignoring them.
+/// Unlike SIG_IGN, a custom handler is NOT inherited by child processes,
+/// so psql and other subprocesses retain their default signal behavior.
+private func noopSignalHandler(_: Int32) {
+    // Intentionally empty — DispatchSource handles the actual logic
+}
+
 /// Intercepts SIGINT and SIGTERM to gracefully shut down child processes.
 ///
 /// When a signal arrives during live execution, the handler:
 /// 1. Terminates any running child process (which triggers PostgreSQL auto-rollback)
 /// 2. Prints a message to stderr explaining the rollback
 /// 3. Exits with 128 + signal number (standard Unix convention)
+///
+/// Uses a no-op C handler rather than `SIG_IGN` to prevent child processes
+/// from inheriting the ignored signal disposition (POSIX inherits SIG_IGN
+/// across fork/exec, but not custom handlers).
 ///
 /// Thread-safe: all state is protected by an `NSLock`.
 public final class SignalHandler: @unchecked Sendable {
@@ -32,9 +43,12 @@ public final class SignalHandler: @unchecked Sendable {
         guard !installed else { return }
         installed = true
 
-        // Ignore default signal handling so DispatchSource can intercept
-        signal(SIGINT, SIG_IGN)
-        signal(SIGTERM, SIG_IGN)
+        // Install a no-op C handler to intercept the signal (preventing default
+        // termination) so the DispatchSource event handler can run. We use a
+        // custom handler instead of SIG_IGN because SIG_IGN is inherited by
+        // child processes, which would prevent psql from handling Ctrl+C.
+        signal(SIGINT, noopSignalHandler)
+        signal(SIGTERM, noopSignalHandler)
 
         let intSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
         intSource.setEventHandler { [weak self] in
