@@ -50,6 +50,9 @@ struct TransferOptions: ParsableArguments {
     )
     var `where`: [String] = []
 
+    @Option(name: .long, help: "Max parallel data transfers (0 = auto-detect, 1 = sequential, default: 0)")
+    var parallel: Int = 0
+
     @Flag(name: [.short, .long], help: "Enable verbose logging output")
     var verbose: Bool = false
 }

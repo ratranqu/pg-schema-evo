@@ -103,7 +103,8 @@ struct CloneCommand: AsyncParsableCommand {
                 force: config.force,
                 retries: transfer.retries,
                 skipPreflight: transfer.skipPreflight,
-                globalRowLimit: transfer.rowLimit
+                globalRowLimit: transfer.rowLimit,
+                parallel: transfer.parallel
             )
         } else {
             // Parse from CLI args only
@@ -149,7 +150,8 @@ struct CloneCommand: AsyncParsableCommand {
                 force: transfer.force,
                 retries: transfer.retries,
                 skipPreflight: transfer.skipPreflight,
-                globalRowLimit: transfer.rowLimit
+                globalRowLimit: transfer.rowLimit,
+                parallel: transfer.parallel
             )
         }
 

@@ -992,7 +992,7 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
 
     // MARK: - Private column/constraint/index/trigger query helpers
 
-    private func queryColumns(schema: String, name: String) async throws -> [ColumnInfo] {
+    public func queryColumns(schema: String, name: String) async throws -> [ColumnInfo] {
         let query: PostgresQuery = """
             SELECT
                 a.attname AS column_name,
@@ -1039,7 +1039,7 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
         return columns
     }
 
-    private func queryConstraints(schema: String, name: String) async throws -> [ConstraintInfo] {
+    public func queryConstraints(schema: String, name: String) async throws -> [ConstraintInfo] {
         let query: PostgresQuery = """
             SELECT
                 con.conname AS constraint_name,
@@ -1084,7 +1084,7 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
         return constraints
     }
 
-    private func queryIndexes(schema: String, name: String) async throws -> [IndexInfo] {
+    public func queryIndexes(schema: String, name: String) async throws -> [IndexInfo] {
         let query: PostgresQuery = """
             SELECT
                 i.relname AS index_name,
@@ -1115,7 +1115,7 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
         return indexes
     }
 
-    private func queryTriggers(schema: String, name: String) async throws -> [TriggerInfo] {
+    public func queryTriggers(schema: String, name: String) async throws -> [TriggerInfo] {
         let query: PostgresQuery = """
             SELECT
                 t.tgname AS trigger_name,
