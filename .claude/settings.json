@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '--- Checking prerequisites ---' && (swift --version 2>/dev/null | head -1 || echo 'ERROR: Swift is not installed. Install Swift 6.2: https://swift.org/install') && (docker --version 2>/dev/null || echo 'ERROR: Docker is not installed. Install Docker: https://docs.docker.com/get-docker/')"
+          }
+        ]
+      }
+    ]
+  }
+}
