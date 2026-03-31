@@ -3,7 +3,7 @@ import PostgresNIO
 import Logging
 @testable import PGSchemaEvoCore
 
-@Suite("Phase 4 Integration Tests", .tags(.integration))
+@Suite("Phase 4 Integration Tests", .tags(.integration), .serialized)
 struct Phase4IntegrationTests {
 
     @Test("Schema diff detects objects only in source")

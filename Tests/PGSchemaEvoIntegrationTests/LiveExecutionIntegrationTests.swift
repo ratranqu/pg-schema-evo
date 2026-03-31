@@ -3,7 +3,7 @@ import PostgresNIO
 import Logging
 @testable import PGSchemaEvoCore
 
-@Suite("Live Execution Integration Tests", .tags(.integration))
+@Suite("Live Execution Integration Tests", .tags(.integration), .serialized)
 struct LiveExecutionIntegrationTests {
 
     @Test("Live clone of single table creates table on target")
@@ -25,7 +25,9 @@ struct LiveExecutionIntegrationTests {
                 ),
             ],
             dryRun: false,
-            force: true
+            force: true,
+            retries: 0,
+            skipPreflight: true
         )
 
         let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
@@ -69,7 +71,9 @@ struct LiveExecutionIntegrationTests {
             ],
             dryRun: false,
             defaultDataMethod: .copy,
-            force: true
+            force: true,
+            retries: 0,
+            skipPreflight: true
         )
 
         let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
@@ -109,7 +113,9 @@ struct LiveExecutionIntegrationTests {
             ],
             dryRun: false,
             dropIfExists: true,
-            force: true
+            force: true,
+            retries: 0,
+            skipPreflight: true
         )
 
         let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
@@ -151,7 +157,9 @@ struct LiveExecutionIntegrationTests {
                 ),
             ],
             dryRun: false,
-            force: true
+            force: true,
+            retries: 0,
+            skipPreflight: true
         )
 
         let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
@@ -193,7 +201,9 @@ struct LiveExecutionIntegrationTests {
                 ObjectSpec(id: ObjectIdentifier(type: .view, schema: "public", name: "active_users")),
             ],
             dryRun: false,
-            force: true
+            force: true,
+            retries: 0,
+            skipPreflight: true
         )
 
         let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
@@ -233,7 +243,9 @@ struct LiveExecutionIntegrationTests {
                 ),
             ],
             dryRun: false,
-            force: true
+            force: true,
+            retries: 0,
+            skipPreflight: true
         )
 
         let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
@@ -270,7 +282,9 @@ struct LiveExecutionIntegrationTests {
                 ),
             ],
             dryRun: false,
-            force: true
+            force: true,
+            retries: 0,
+            skipPreflight: true
         )
 
         let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
@@ -317,7 +331,9 @@ struct LiveExecutionIntegrationTests {
             ],
             dryRun: false,
             dropIfExists: true,
-            force: true
+            force: true,
+            retries: 0,
+            skipPreflight: true
         )
 
         let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)

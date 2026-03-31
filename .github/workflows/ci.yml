@@ -75,7 +75,7 @@ jobs:
         env:
           SOURCE_DSN: "postgresql://testuser:testpass@source-pg:5432/source_db"
           TARGET_DSN: "postgresql://testuser:testpass@target-pg:5432/target_db"
-        run: swift test --filter PGSchemaEvoIntegrationTests
+        run: swift test --filter PGSchemaEvoIntegrationTests --num-workers 1
 
   docker-build:
     name: Docker Build
