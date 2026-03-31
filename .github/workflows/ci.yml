@@ -121,6 +121,8 @@ jobs:
     name: Coverage Report
     runs-on: ubuntu-latest
     needs: [unit-tests, integration-tests]
+    permissions:
+      contents: write
     steps:
       - name: Download unit coverage
         uses: actions/download-artifact@v4
@@ -204,6 +206,27 @@ jobs:
             fi
           else
             echo "No baseline coverage found — skipping regression check."
+          fi
+
+      - name: Update README coverage badge (main branch)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          apt-get install -y -qq git > /dev/null 2>&1
+          COVERAGE="${{ steps.coverage.outputs.line_coverage }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout main
+
+          # Update the coverage line in README.md
+          sed -i "s/| Line coverage | .*|/| Line coverage | **${COVERAGE}%** (max 1% regression per PR) |/" README.md
+
+          if git diff --quiet README.md; then
+            echo "No coverage change — skipping commit."
+          else
+            git add README.md
+            git commit -m "Update code coverage baseline to ${COVERAGE}% [skip ci]"
+            git push origin main
           fi
 
       - name: Upload combined coverage artifact
