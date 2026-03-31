@@ -11,10 +11,13 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    container:
-      image: swift:6.2
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: '6.2'
 
       - name: Cache Swift build
         uses: actions/cache@v4
@@ -29,10 +32,13 @@ jobs:
     name: Unit Tests
     needs: [build]
     runs-on: ubuntu-latest
-    container:
-      image: swift:6.2
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: '6.2'
 
       - name: Restore Swift build cache
         uses: actions/cache/restore@v4
@@ -97,19 +103,17 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
-    container:
-      image: swift:6.2
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install PostgreSQL client
-        run: |
-          apt-get update && apt-get install -y postgresql-client
+      - name: Setup Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: '6.2'
 
       - name: Seed source database
         run: |
-          psql "postgresql://testuser:testpass@source-pg:5432/source_db" -f docker/seed/init.sql
+          psql "postgresql://testuser:testpass@localhost:5432/source_db" -f docker/seed/init.sql
 
       - name: Restore Swift build cache
         uses: actions/cache/restore@v4
@@ -119,8 +123,8 @@ jobs:
 
       - name: Run integration tests with coverage
         env:
-          SOURCE_DSN: "postgresql://testuser:testpass@source-pg:5432/source_db"
-          TARGET_DSN: "postgresql://testuser:testpass@target-pg:5432/target_db"
+          SOURCE_DSN: "postgresql://testuser:testpass@localhost:5432/source_db"
+          TARGET_DSN: "postgresql://testuser:testpass@localhost:5433/target_db"
         run: swift test --filter PGSchemaEvoIntegrationTests --parallel --num-workers 1 --enable-code-coverage
 
       - name: Generate coverage report
@@ -165,8 +169,6 @@ jobs:
       - name: Merge coverage and check regression
         id: coverage
         run: |
-          apt-get update -qq && apt-get install -y -qq python3 bc > /dev/null 2>&1
-
           # Merge LCOV files by taking max hit count per file+line.
           # Simple concatenation double-counts lines, halving coverage.
           python3 - coverage-unit.lcov coverage-integration.lcov coverage-combined.lcov <<'PYEOF'
@@ -255,7 +257,6 @@ jobs:
       - name: Check coverage regression (PR)
         if: github.event_name == 'pull_request'
         run: |
-          apt-get update -qq && apt-get install -y -qq bc > /dev/null 2>&1
           CURRENT="${{ steps.coverage.outputs.line_coverage }}"
           MINIMUM="70.0"
 
