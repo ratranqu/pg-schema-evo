@@ -184,10 +184,12 @@ docker compose -f docker/docker-compose.yml down
 
 ### Code Coverage
 
+Coverage is collected from both unit and integration tests in CI, merged into a combined report. Pull requests that reduce line coverage by more than 1% will fail the coverage check.
+
 Generate a coverage report locally:
 
 ```bash
-swift test --filter PGSchemaEvoCoreTests --enable-code-coverage
+swift test --enable-code-coverage
 BIN=$(swift build --show-bin-path)
 llvm-cov report \
   -instr-profile="$(find .build -name default.profdata)" \
@@ -195,12 +197,10 @@ llvm-cov report \
   -ignore-filename-regex='Tests/|\.build/'
 ```
 
-Coverage is tracked automatically in CI. Pull requests that reduce line coverage by more than 1% will fail the coverage check.
-
 | Metric | Target |
 |--------|--------|
 | Line coverage | Maintained (max 1% regression per PR) |
-| Test suites | 16 suites, 94 tests |
+| Test suites | 16 suites, 94 tests (unit + integration) |
 
 ## Documentation
 
