@@ -136,12 +136,24 @@ When `--rls` is enabled (or `rls: true` in YAML config), the tool:
 2. Enables RLS on the target table (`ALTER TABLE ... ENABLE ROW LEVEL SECURITY`)
 3. Recreates each policy with its original definition
 
+## Transaction Isolation
+
+Live execution runs the entire clone within a **single psql session** for true
+transaction isolation. The approach:
+
+1. **Pre-fetch**: Source data for all COPY steps is exported first (separate processes)
+2. **Build script**: A complete SQL script is assembled with `BEGIN`, all DDL/data
+   inline (using `COPY ... FROM STDIN`), and `COMMIT`
+3. **Execute atomically**: The script is sent to one psql process against the target
+
+Because everything runs in one PostgreSQL session, `BEGIN`/`COMMIT` provide genuine
+atomicity — either all objects are created or nothing is committed. On failure,
+PostgreSQL automatically rolls back when the session disconnects.
+
 ## Retry and Rollback
 
-Live execution wraps the entire clone in a database transaction:
-
-- On failure: `ROLLBACK` is issued, then the tool waits with exponential backoff
-  (2^attempt seconds) before retrying
+- On failure: the transaction is automatically rolled back (session disconnect),
+  then the tool waits with exponential backoff (2^attempt seconds) before retrying
 - Default: 3 retry attempts (configurable via `--retries` or YAML config)
 - On success: `COMMIT` finalizes all changes atomically
 

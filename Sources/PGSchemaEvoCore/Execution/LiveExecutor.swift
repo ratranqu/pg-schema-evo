@@ -15,7 +15,16 @@ public struct LiveExecutor: Sendable {
         self.logger = logger
     }
 
-    /// Execute all clone steps wrapped in a single transaction.
+    /// Execute all clone steps in a single psql session for true transaction isolation.
+    ///
+    /// This method:
+    /// 1. Pre-fetches source data for all COPY steps (separate processes per source DB)
+    /// 2. Builds a complete SQL script with BEGIN/COMMIT wrapping
+    /// 3. Executes the entire script in one psql process against the target DB
+    ///
+    /// Because all SQL runs in a single psql session, BEGIN/COMMIT provide true
+    /// transaction semantics — either everything succeeds or nothing is committed.
+    /// On failure, PostgreSQL automatically rolls back when the session disconnects.
     public func executeInTransaction(steps: [CloneStep], job: CloneJob) async throws {
         guard let psqlPath = shell.which("psql") else {
             throw PGSchemaEvoError.shellCommandFailed(
@@ -33,45 +42,54 @@ public struct LiveExecutor: Sendable {
         let progress = ProgressReporter(totalSteps: steps.count)
         progress.reportStart(objectCount: job.objects.count)
 
-        // Begin transaction
-        try await executePsql(
-            psqlPath: psqlPath, dsn: targetDSN, sql: "BEGIN;",
-            env: env, description: "BEGIN transaction"
-        )
-
-        do {
-            for (index, step) in steps.enumerated() {
+        // Phase 1: Pre-fetch source data for all COPY steps
+        var prefetchedData: [Int: String] = [:]
+        for (index, step) in steps.enumerated() {
+            if case .copyData(let id, let method, _, let whereClause, let rowLimit) = step {
                 let stepNum = index + 1
-                let desc = stepDescription(step)
-                progress.reportStep(stepNum, description: desc)
+                progress.reportStep(stepNum, description: "Fetching data for \(id)")
 
-                try await executeStep(
-                    step: step,
+                let data = try await fetchSourceData(
                     psqlPath: psqlPath,
-                    targetDSN: targetDSN,
                     sourceDSN: sourceDSN,
-                    env: env,
-                    sourceEnv: sourceEnv
+                    id: id,
+                    method: method,
+                    sourceEnv: sourceEnv,
+                    whereClause: whereClause,
+                    rowLimit: rowLimit
                 )
+                prefetchedData[index] = data
 
-                progress.reportStepComplete(stepNum, description: desc)
+                progress.reportStepComplete(stepNum, description: "Fetched data for \(id)")
             }
-
-            // Commit
-            try await executePsql(
-                psqlPath: psqlPath, dsn: targetDSN, sql: "COMMIT;",
-                env: env, description: "COMMIT transaction"
-            )
-        } catch {
-            // Rollback on failure
-            logger.warning("Rolling back transaction due to error...")
-            try? await executePsql(
-                psqlPath: psqlPath, dsn: targetDSN, sql: "ROLLBACK;",
-                env: env, description: "ROLLBACK transaction"
-            )
-            throw error
         }
 
+        // Phase 2: Build complete SQL script
+        let script = buildTransactionScript(steps: steps, prefetchedData: prefetchedData)
+        logger.debug("Transaction script (\(script.count) bytes, \(steps.count) steps)")
+
+        // Phase 3: Execute the entire script in a single psql process
+        progress.reportStep(steps.count, description: "Executing transaction")
+
+        let result = try await shell.run(
+            command: psqlPath,
+            arguments: [targetDSN, "--set", "ON_ERROR_STOP=1", "-X"],
+            environment: env,
+            input: script
+        )
+
+        guard result.succeeded else {
+            // No explicit ROLLBACK needed — PostgreSQL automatically rolls back
+            // uncommitted transactions when the session disconnects.
+            logger.error("Transaction failed: \(result.stderr)")
+            throw PGSchemaEvoError.shellCommandFailed(
+                command: "psql (transaction)",
+                exitCode: result.exitCode,
+                stderr: result.stderr
+            )
+        }
+
+        logger.debug("Transaction output: \(result.stdout)")
         progress.reportComplete(stepCount: steps.count)
     }
 
@@ -117,7 +135,132 @@ public struct LiveExecutor: Sendable {
         progress.reportComplete(stepCount: steps.count)
     }
 
-    // MARK: - Private
+    // MARK: - Transaction Script Building
+
+    /// Build a complete SQL script that runs all steps within a single transaction.
+    func buildTransactionScript(
+        steps: [CloneStep],
+        prefetchedData: [Int: String]
+    ) -> String {
+        var script = "BEGIN;\n\n"
+
+        for (index, step) in steps.enumerated() {
+            script += "-- Step \(index + 1): \(stepDescription(step))\n"
+
+            switch step {
+            case .dropObject(let id):
+                script += generateDropSQL(for: id) + "\n\n"
+
+            case .createObject(let sql, _):
+                script += sql + "\n\n"
+
+            case .copyData(let id, let method, _, _, _):
+                if let data = prefetchedData[index], !data.isEmpty {
+                    switch method {
+                    case .pgDump:
+                        // pg_dump --format=plain output is SQL-ready (contains COPY statements)
+                        script += data
+                        if !data.hasSuffix("\n") { script += "\n" }
+                        script += "\n"
+                    case .copy, .auto:
+                        // Inline COPY FROM STDIN with CSV data, terminated by \.
+                        script += "COPY \(id.qualifiedName) FROM STDIN WITH (FORMAT csv, HEADER);\n"
+                        script += data
+                        if !data.hasSuffix("\n") { script += "\n" }
+                        script += "\\.\n\n"
+                    }
+                }
+
+            case .grantPermissions(let sql, _):
+                script += sql + "\n\n"
+
+            case .refreshMaterializedView(let id):
+                script += "REFRESH MATERIALIZED VIEW \(id.qualifiedName);\n\n"
+
+            case .enableRLS(let sql, _):
+                script += sql + "\n\n"
+
+            case .attachPartition(let sql, _):
+                script += sql + "\n\n"
+            }
+        }
+
+        script += "COMMIT;\n"
+        return script
+    }
+
+    /// Pre-fetch source data for a COPY step from the source database.
+    private func fetchSourceData(
+        psqlPath: String,
+        sourceDSN: String,
+        id: ObjectIdentifier,
+        method: TransferMethod,
+        sourceEnv: [String: String],
+        whereClause: String?,
+        rowLimit: Int?
+    ) async throws -> String {
+        switch method {
+        case .copy, .auto:
+            let copyCommand: String
+            if whereClause != nil || rowLimit != nil {
+                var query = "SELECT * FROM \(id.qualifiedName)"
+                if let wh = whereClause { query += " WHERE \(wh)" }
+                if let lim = rowLimit { query += " LIMIT \(lim)" }
+                copyCommand = "\\copy (\(query)) TO STDOUT WITH (FORMAT csv, HEADER)"
+            } else {
+                copyCommand = "\\copy \(id.qualifiedName) TO STDOUT WITH (FORMAT csv, HEADER)"
+            }
+
+            let result = try await shell.run(
+                command: psqlPath,
+                arguments: [sourceDSN, "-c", copyCommand],
+                environment: sourceEnv
+            )
+
+            guard result.succeeded else {
+                throw PGSchemaEvoError.shellCommandFailed(
+                    command: "psql COPY export \(id)",
+                    exitCode: result.exitCode,
+                    stderr: result.stderr
+                )
+            }
+
+            logger.info("Fetched data for \(id) (\(result.stdout.count) bytes)")
+            return result.stdout
+
+        case .pgDump:
+            guard let pgDumpPath = shell.which("pg_dump") else {
+                throw PGSchemaEvoError.shellCommandFailed(
+                    command: "pg_dump",
+                    exitCode: -1,
+                    stderr: "pg_dump not found in PATH"
+                )
+            }
+
+            // Use --format=plain to get SQL output that can be inlined in the transaction
+            let result = try await shell.run(
+                command: pgDumpPath,
+                arguments: [
+                    "--format=plain", "--data-only",
+                    "--table=\(id.qualifiedName)", sourceDSN,
+                ],
+                environment: sourceEnv
+            )
+
+            guard result.succeeded else {
+                throw PGSchemaEvoError.shellCommandFailed(
+                    command: "pg_dump \(id)",
+                    exitCode: result.exitCode,
+                    stderr: result.stderr
+                )
+            }
+
+            logger.info("Fetched data via pg_dump for \(id) (\(result.stdout.count) bytes)")
+            return result.stdout
+        }
+    }
+
+    // MARK: - Per-Step Execution (used by non-transaction path)
 
     private func executeStep(
         step: CloneStep,

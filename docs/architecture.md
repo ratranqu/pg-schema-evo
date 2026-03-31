@@ -34,7 +34,7 @@ PostgresNIO handles schema introspection queries (fast, type-safe, async). Data 
 The default workflow is dry-run. The tool generates a complete, executable bash script. This is safer for production-to-dev workflows and allows review before execution.
 
 ### Live execution with transactions
-Live mode wraps the entire clone in a transaction with automatic retry (configurable, default 3 attempts) and exponential backoff. Failed attempts trigger ROLLBACK before retry.
+Live mode executes the entire clone within a single psql session for true transaction isolation. All DDL and data transfer (via `COPY FROM STDIN`) run in one connection, so `BEGIN`/`COMMIT` provide genuine atomicity — either everything succeeds or nothing is committed. Source data is pre-fetched before the transaction script is built and executed. On failure, PostgreSQL automatically rolls back when the session disconnects. Retries (configurable, default 3 attempts) use exponential backoff and restart the full transaction cleanly.
 
 ### Protocol-based generators
 Each object type has its own `SQLGenerator` implementation. Adding support for a new object type means implementing the protocol and registering it in `CloneOrchestrator`.
@@ -79,12 +79,12 @@ RLS policies can be optionally cloned (`--rls` flag or `rls: true` in YAML). The
 | 2 | Views, matviews, sequences, enums, functions, procedures, schemas, roles, extensions, permissions, inspect/list commands, hybrid pg_dump introspection for exotic types |
 | 3 | YAML config files with env var interpolation, composite types, FK + view dependency resolution, progress output, Docker image, shell completions |
 | 4 | Schema diffing (`diff` command), selective data (WHERE/row limits), pre-flight validation (`check` command), declarative partitions, RLS policies, retry with rollback, code coverage in CI |
+| 5 | True transaction isolation via single-session execution, CI optimization (shared build cache, Docker build gating) |
 
 ### Future Work
 
 | Area | Description |
 |------|-------------|
-| Transaction isolation | Refactor `LiveExecutor` to use a single persistent `psql` session instead of spawning separate processes per step, enabling true transaction wrapping |
 | Signal handling | Graceful SIGINT/SIGTERM handling with rollback on interrupt |
 | Incremental sync | Detect what has changed since last clone and only transfer deltas |
 | Schema migration | Generate and apply ALTER statements from `diff` output instead of DROP/CREATE |
