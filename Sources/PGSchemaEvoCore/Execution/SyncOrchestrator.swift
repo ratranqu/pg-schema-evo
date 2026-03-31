@@ -43,78 +43,116 @@ public struct SyncOrchestrator: Sendable {
         var steps: [CloneStep] = []
 
         do {
-            // Determine which types to diff based on requested objects
-            let requestedTypes = Array(Set(job.objects.map(\.id.type)))
-            let requestedSchemas = job.objects.compactMap(\.id.schema).first
+            if job.syncAll {
+                // Full diff: compare all objects of the requested types
+                let requestedTypes = Array(Set(job.objects.map(\.id.type)))
+                let requestedSchemas = job.objects.compactMap(\.id.schema).first
 
-            // Run the diff
-            let diff = try await differ.diff(
-                source: sourceIntrospector,
-                target: targetIntrospector,
-                schema: requestedSchemas,
-                types: requestedTypes
-            )
-
-            // Filter diff results to only include requested objects
-            let requestedIds = Set(job.objects.map(\.id))
-
-            // Handle objects only in source (need to be created)
-            let newObjects = job.syncAll
-                ? diff.onlyInSource
-                : diff.onlyInSource.filter { requestedIds.contains($0) }
-
-            for id in newObjects {
-                logger.info("New object to create: \(id)")
-                if job.dropIfExists {
-                    steps.append(.dropObject(id))
-                }
-                let createSteps = try await generateCreateSteps(
-                    for: id,
-                    sourceIntrospector: sourceIntrospector,
-                    pgDumpIntrospector: pgDumpIntrospector,
-                    tableSQLGen: tableSQLGen,
-                    viewSQLGen: viewSQLGen,
-                    seqSQLGen: seqSQLGen,
-                    enumSQLGen: enumSQLGen,
-                    funcSQLGen: funcSQLGen,
-                    schemaSQLGen: schemaSQLGen,
-                    compositeTypeSQLGen: compositeTypeSQLGen,
-                    permissionSQLGen: permissionSQLGen,
-                    job: job
+                let diff = try await differ.diff(
+                    source: sourceIntrospector,
+                    target: targetIntrospector,
+                    schema: requestedSchemas,
+                    types: requestedTypes
                 )
-                steps.append(contentsOf: createSteps)
-            }
 
-            // Handle modified objects (need ALTER statements)
-            let modifiedObjects = job.syncAll
-                ? diff.modified
-                : diff.modified.filter { requestedIds.contains($0.id) }
-
-            for objDiff in modifiedObjects {
-                logger.info("Modified object: \(objDiff.id) (\(objDiff.differences.count) difference(s))")
-                let combinedSQL = objDiff.migrationSQL.joined(separator: "\n")
-                if !combinedSQL.isEmpty {
-                    steps.append(.alterObject(sql: combinedSQL, id: objDiff.id))
+                // Handle objects only in source (need to be created)
+                for id in diff.onlyInSource {
+                    logger.info("New object to create: \(id)")
+                    if job.dropIfExists {
+                        steps.append(.dropObject(id))
+                    }
+                    let createSteps = try await generateCreateSteps(
+                        for: id,
+                        sourceIntrospector: sourceIntrospector,
+                        pgDumpIntrospector: pgDumpIntrospector,
+                        tableSQLGen: tableSQLGen,
+                        viewSQLGen: viewSQLGen,
+                        seqSQLGen: seqSQLGen,
+                        enumSQLGen: enumSQLGen,
+                        funcSQLGen: funcSQLGen,
+                        schemaSQLGen: schemaSQLGen,
+                        compositeTypeSQLGen: compositeTypeSQLGen,
+                        permissionSQLGen: permissionSQLGen,
+                        job: job
+                    )
+                    steps.append(contentsOf: createSteps)
                 }
-            }
 
-            // Handle objects only in target (optionally drop)
-            if job.dropExtra {
-                let extraObjects = job.syncAll
-                    ? diff.onlyInTarget
-                    : diff.onlyInTarget.filter { requestedIds.contains($0) }
-
-                for id in extraObjects {
-                    logger.info("Extra object to drop: \(id)")
-                    steps.append(.dropObject(id))
+                // Handle modified objects (need ALTER statements)
+                for objDiff in diff.modified {
+                    logger.info("Modified object: \(objDiff.id) (\(objDiff.differences.count) difference(s))")
+                    let combinedSQL = objDiff.migrationSQL.joined(separator: "\n")
+                    if !combinedSQL.isEmpty {
+                        steps.append(.alterObject(sql: combinedSQL, id: objDiff.id))
+                    }
                 }
-            }
 
-            // Report summary
-            let newCount = newObjects.count
-            let modCount = modifiedObjects.count
-            let matching = diff.matching
-            logger.info("Sync summary: \(newCount) new, \(modCount) modified, \(matching) matching")
+                // Handle objects only in target (optionally drop)
+                if job.dropExtra {
+                    for id in diff.onlyInTarget {
+                        logger.info("Extra object to drop: \(id)")
+                        steps.append(.dropObject(id))
+                    }
+                }
+
+                logger.info("Sync summary: \(diff.onlyInSource.count) new, \(diff.modified.count) modified, \(diff.matching) matching")
+            } else {
+                // Targeted diff: only check the specific requested objects
+                let requestedIds = Set(job.objects.map(\.id))
+
+                for id in requestedIds {
+                    let existsOnSource = await objectExists(id, on: sourceIntrospector)
+                    let existsOnTarget = await objectExists(id, on: targetIntrospector)
+
+                    switch (existsOnSource, existsOnTarget) {
+                    case (true, false):
+                        // Object only in source — create on target
+                        logger.info("New object to create: \(id)")
+                        if job.dropIfExists {
+                            steps.append(.dropObject(id))
+                        }
+                        let createSteps = try await generateCreateSteps(
+                            for: id,
+                            sourceIntrospector: sourceIntrospector,
+                            pgDumpIntrospector: pgDumpIntrospector,
+                            tableSQLGen: tableSQLGen,
+                            viewSQLGen: viewSQLGen,
+                            seqSQLGen: seqSQLGen,
+                            enumSQLGen: enumSQLGen,
+                            funcSQLGen: funcSQLGen,
+                            schemaSQLGen: schemaSQLGen,
+                            compositeTypeSQLGen: compositeTypeSQLGen,
+                            permissionSQLGen: permissionSQLGen,
+                            job: job
+                        )
+                        steps.append(contentsOf: createSteps)
+
+                    case (true, true):
+                        // Object in both — compare for differences
+                        if let objDiff = try await differ.compareObjects(id, source: sourceIntrospector, target: targetIntrospector) {
+                            logger.info("Modified object: \(objDiff.id) (\(objDiff.differences.count) difference(s))")
+                            let combinedSQL = objDiff.migrationSQL.joined(separator: "\n")
+                            if !combinedSQL.isEmpty {
+                                steps.append(.alterObject(sql: combinedSQL, id: objDiff.id))
+                            }
+                        }
+
+                    case (false, true):
+                        // Object only in target — drop if requested
+                        if job.dropExtra {
+                            logger.info("Extra object to drop: \(id)")
+                            steps.append(.dropObject(id))
+                        }
+
+                    case (false, false):
+                        logger.warning("Object \(id) not found in source or target, skipping")
+                    }
+                }
+
+                let newCount = steps.filter { if case .createObject = $0 { return true }; return false }.count
+                let modCount = steps.filter { if case .alterObject = $0 { return true }; return false }.count
+                logger.info("Sync summary: \(newCount) new, \(modCount) modified")
+            }
 
         } catch {
             try? await sourceConn.close()
@@ -232,5 +270,15 @@ public struct SyncOrchestrator: Sendable {
         }
 
         return steps
+    }
+
+    /// Check if an object exists in the given database by listing objects and checking membership.
+    private func objectExists(_ id: ObjectIdentifier, on introspector: SchemaIntrospector) async -> Bool {
+        do {
+            let objects = try await introspector.listObjects(schema: id.schema, types: [id.type])
+            return objects.contains(id)
+        } catch {
+            return false
+        }
     }
 }

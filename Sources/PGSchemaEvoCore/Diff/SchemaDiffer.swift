@@ -42,6 +42,15 @@ public struct SchemaDiffer: Sendable {
         )
     }
 
+    /// Compare a single object between source and target databases.
+    public func compareObjects(
+        _ id: ObjectIdentifier,
+        source: SchemaIntrospector,
+        target: SchemaIntrospector
+    ) async throws -> ObjectDiff? {
+        try await compareObject(id, source: source, target: target)
+    }
+
     private func compareObject(
         _ id: ObjectIdentifier,
         source: SchemaIntrospector,
