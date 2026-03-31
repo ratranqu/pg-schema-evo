@@ -81,12 +81,13 @@ RLS policies can be optionally cloned (`--rls` flag or `rls: true` in YAML). The
 | 4 | Schema diffing (`diff` command), selective data (WHERE/row limits), pre-flight validation (`check` command), declarative partitions, RLS policies, retry with rollback, code coverage in CI |
 | 5 | True transaction isolation via single-session execution, CI optimization (shared build cache, Docker build gating) |
 | 6 | Graceful SIGINT/SIGTERM signal handling with automatic rollback on interrupt |
+| 7 | Incremental schema sync (`sync` command) — detects changes via `SchemaDiffer`, generates ALTER/CREATE/DROP steps for delta application |
 
 ### Future Work
 
 | Area | Description |
 |------|-------------|
-| Incremental sync | Detect what has changed since last clone and only transfer deltas |
+| Incremental data sync | Timestamp-based change detection and UPSERT for row-level deltas |
 | Schema migration | Generate and apply ALTER statements from `diff` output instead of DROP/CREATE |
 | Conflict resolution | Interactive merge when target has diverged from source |
 | Performance | Parallel data transfer for independent tables, streaming COPY |
@@ -97,6 +98,7 @@ RLS policies can be optionally cloned (`--rls` flag or `rls: true` in YAML). The
 | Command | Description |
 |---------|-------------|
 | `clone` | Clone objects from source to target database |
+| `sync` | Incrementally sync schema changes from source to target |
 | `diff` | Compare schemas between two databases |
 | `check` | Run pre-flight validation checks |
 | `inspect` | Show detailed metadata for a single object |

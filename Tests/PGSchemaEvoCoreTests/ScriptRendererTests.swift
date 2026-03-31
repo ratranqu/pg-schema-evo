@@ -434,4 +434,18 @@ struct ScriptRendererTests {
         #expect(script.contains("WHERE year > 2020"))
         #expect(script.contains("LIMIT 1000"))
     }
+
+    @Test("Renders ALTER step with psql heredoc")
+    func alterStep() {
+        let job = makeJob()
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "users")
+        let steps: [CloneStep] = [
+            .alterObject(sql: "ALTER TABLE \"public\".\"users\" ADD COLUMN \"email\" text;", id: id),
+        ]
+        let script = renderer.render(job: job, steps: steps)
+        #expect(script.contains("Alter table: table:public.users"))
+        #expect(script.contains("ALTER TABLE"))
+        #expect(script.contains("ADD COLUMN"))
+        #expect(script.contains("psql"))
+    }
 }

@@ -162,6 +162,9 @@ public struct LiveExecutor: Sendable {
             case .createObject(let sql, _):
                 script += sql + "\n\n"
 
+            case .alterObject(let sql, _):
+                script += sql + "\n\n"
+
             case .copyData(let id, let method, _, _, _):
                 if let data = prefetchedData[index], !data.isEmpty {
                     switch method {
@@ -296,6 +299,15 @@ public struct LiveExecutor: Sendable {
                 sql: sql,
                 env: env,
                 description: "CREATE \(id)"
+            )
+
+        case .alterObject(let sql, let id):
+            try await executePsql(
+                psqlPath: psqlPath,
+                dsn: targetDSN,
+                sql: sql,
+                env: env,
+                description: "ALTER \(id)"
             )
 
         case .copyData(let id, let method, _, let whereClause, let rowLimit):
@@ -530,6 +542,7 @@ public struct LiveExecutor: Sendable {
         switch step {
         case .dropObject(let id): "Drop \(id.type.displayName) \(id)"
         case .createObject(_, let id): "Create \(id.type.displayName) \(id)"
+        case .alterObject(_, let id): "Alter \(id.type.displayName) \(id)"
         case .copyData(let id, let method, _, _, _): "Copy data for \(id) via \(method.rawValue)"
         case .grantPermissions(_, let id): "Grant permissions on \(id)"
         case .refreshMaterializedView(let id): "Refresh materialized view \(id)"

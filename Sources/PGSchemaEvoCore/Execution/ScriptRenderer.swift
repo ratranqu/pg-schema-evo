@@ -49,6 +49,10 @@ public struct ScriptRenderer: Sendable {
             section += sectionHeader(number, "Create \(id.type.displayName): \(id)")
             section += wrapInPsql(sql, target: "$TARGET_DSN")
 
+        case .alterObject(let sql, let id):
+            section += sectionHeader(number, "Alter \(id.type.displayName): \(id)")
+            section += wrapInPsql(sql, target: "$TARGET_DSN")
+
         case .copyData(let id, let method, let estimatedSize, let whereClause, let rowLimit):
             let sizeStr = estimatedSize.map { formatBytes($0) } ?? "unknown size"
             var desc = "Copy data: \(id) (estimated \(sizeStr), method: \(method.rawValue))"
@@ -170,6 +174,7 @@ public struct ScriptRenderer: Sendable {
 public enum CloneStep: Sendable {
     case dropObject(ObjectIdentifier)
     case createObject(sql: String, id: ObjectIdentifier)
+    case alterObject(sql: String, id: ObjectIdentifier)
     case copyData(id: ObjectIdentifier, method: TransferMethod, estimatedSize: Int?, whereClause: String? = nil, rowLimit: Int? = nil)
     case grantPermissions(sql: String, id: ObjectIdentifier)
     case refreshMaterializedView(ObjectIdentifier)

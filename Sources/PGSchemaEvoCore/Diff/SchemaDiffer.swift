@@ -58,7 +58,16 @@ public struct SchemaDiffer: Sendable {
             return try await compareEnum(id, source: source, target: target)
         case .function, .procedure:
             return try await compareFunction(id, source: source, target: target)
+        case .compositeType:
+            return try await compareCompositeType(id, source: source, target: target)
+        case .schema:
+            return try await compareSchema(id, source: source, target: target)
+        case .role:
+            return try await compareRole(id, source: source, target: target)
+        case .extension:
+            return try await compareExtension(id, source: source, target: target)
         default:
+            // Aggregates, operators, FDWs, foreign tables: no structured comparison yet
             return nil
         }
     }
@@ -271,6 +280,128 @@ public struct SchemaDiffer: Sendable {
             id: id,
             differences: ["Function definition differs"],
             migrationSQL: [srcDef + ";"]
+        )
+    }
+
+    private func compareCompositeType(
+        _ id: ObjectIdentifier,
+        source: SchemaIntrospector,
+        target: SchemaIntrospector
+    ) async throws -> ObjectDiff? {
+        let srcMeta = try await source.describeCompositeType(id)
+        let tgtMeta = try await target.describeCompositeType(id)
+
+        let srcAttrs = Dictionary(uniqueKeysWithValues: srcMeta.attributes.map { ($0.name, $0) })
+        let tgtAttrs = Dictionary(uniqueKeysWithValues: tgtMeta.attributes.map { ($0.name, $0) })
+
+        var diffs: [String] = []
+        var sql: [String] = []
+
+        for (name, srcAttr) in srcAttrs {
+            if let tgtAttr = tgtAttrs[name] {
+                if srcAttr.dataType != tgtAttr.dataType {
+                    diffs.append("Attribute \(name): type \(tgtAttr.dataType) -> \(srcAttr.dataType)")
+                    sql.append("ALTER TYPE \(id.qualifiedName) ALTER ATTRIBUTE \(quoteIdent(name)) TYPE \(srcAttr.dataType);")
+                }
+            } else {
+                diffs.append("Attribute \(name): missing in target (type: \(srcAttr.dataType))")
+                sql.append("ALTER TYPE \(id.qualifiedName) ADD ATTRIBUTE \(quoteIdent(name)) \(srcAttr.dataType);")
+            }
+        }
+
+        for (name, _) in tgtAttrs where srcAttrs[name] == nil {
+            diffs.append("Attribute \(name): extra in target")
+            sql.append("ALTER TYPE \(id.qualifiedName) DROP ATTRIBUTE \(quoteIdent(name));")
+        }
+
+        guard !diffs.isEmpty else { return nil }
+        return ObjectDiff(id: id, differences: diffs, migrationSQL: sql)
+    }
+
+    private func compareSchema(
+        _ id: ObjectIdentifier,
+        source: SchemaIntrospector,
+        target: SchemaIntrospector
+    ) async throws -> ObjectDiff? {
+        let srcMeta = try await source.describeSchema(id)
+        let tgtMeta = try await target.describeSchema(id)
+
+        guard srcMeta.owner != tgtMeta.owner else { return nil }
+
+        return ObjectDiff(
+            id: id,
+            differences: ["Owner: \(tgtMeta.owner) -> \(srcMeta.owner)"],
+            migrationSQL: ["ALTER SCHEMA \(id.qualifiedName) OWNER TO \(quoteIdent(srcMeta.owner));"]
+        )
+    }
+
+    private func compareRole(
+        _ id: ObjectIdentifier,
+        source: SchemaIntrospector,
+        target: SchemaIntrospector
+    ) async throws -> ObjectDiff? {
+        let srcMeta = try await source.describeRole(id)
+        let tgtMeta = try await target.describeRole(id)
+
+        var diffs: [String] = []
+        var alterParts: [String] = []
+
+        if srcMeta.canLogin != tgtMeta.canLogin {
+            diffs.append("LOGIN: \(tgtMeta.canLogin) -> \(srcMeta.canLogin)")
+            alterParts.append(srcMeta.canLogin ? "LOGIN" : "NOLOGIN")
+        }
+        if srcMeta.isSuperuser != tgtMeta.isSuperuser {
+            diffs.append("SUPERUSER: \(tgtMeta.isSuperuser) -> \(srcMeta.isSuperuser)")
+            alterParts.append(srcMeta.isSuperuser ? "SUPERUSER" : "NOSUPERUSER")
+        }
+        if srcMeta.canCreateDB != tgtMeta.canCreateDB {
+            diffs.append("CREATEDB: \(tgtMeta.canCreateDB) -> \(srcMeta.canCreateDB)")
+            alterParts.append(srcMeta.canCreateDB ? "CREATEDB" : "NOCREATEDB")
+        }
+        if srcMeta.canCreateRole != tgtMeta.canCreateRole {
+            diffs.append("CREATEROLE: \(tgtMeta.canCreateRole) -> \(srcMeta.canCreateRole)")
+            alterParts.append(srcMeta.canCreateRole ? "CREATEROLE" : "NOCREATEROLE")
+        }
+        if srcMeta.connectionLimit != tgtMeta.connectionLimit {
+            diffs.append("CONNECTION LIMIT: \(tgtMeta.connectionLimit) -> \(srcMeta.connectionLimit)")
+            alterParts.append("CONNECTION LIMIT \(srcMeta.connectionLimit)")
+        }
+
+        var sql: [String] = []
+        if !alterParts.isEmpty {
+            sql.append("ALTER ROLE \(quoteIdent(id.name)) \(alterParts.joined(separator: " "));")
+        }
+
+        // Membership changes
+        let srcMembers = Set(srcMeta.memberOf)
+        let tgtMembers = Set(tgtMeta.memberOf)
+        for role in srcMembers.subtracting(tgtMembers) {
+            diffs.append("Membership: missing GRANT \(role)")
+            sql.append("GRANT \(quoteIdent(role)) TO \(quoteIdent(id.name));")
+        }
+        for role in tgtMembers.subtracting(srcMembers) {
+            diffs.append("Membership: extra GRANT \(role)")
+            sql.append("REVOKE \(quoteIdent(role)) FROM \(quoteIdent(id.name));")
+        }
+
+        guard !diffs.isEmpty else { return nil }
+        return ObjectDiff(id: id, differences: diffs, migrationSQL: sql)
+    }
+
+    private func compareExtension(
+        _ id: ObjectIdentifier,
+        source: SchemaIntrospector,
+        target: SchemaIntrospector
+    ) async throws -> ObjectDiff? {
+        let srcMeta = try await source.describeExtension(id)
+        let tgtMeta = try await target.describeExtension(id)
+
+        guard srcMeta.version != tgtMeta.version else { return nil }
+
+        return ObjectDiff(
+            id: id,
+            differences: ["Version: \(tgtMeta.version) -> \(srcMeta.version)"],
+            migrationSQL: ["ALTER EXTENSION \(quoteIdent(id.name)) UPDATE TO '\(escapeSQLString(srcMeta.version))';"]
         )
     }
 
