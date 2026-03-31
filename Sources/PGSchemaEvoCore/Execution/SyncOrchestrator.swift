@@ -85,6 +85,13 @@ public struct SyncOrchestrator: Sendable {
                     if !combinedSQL.isEmpty {
                         steps.append(.alterObject(sql: combinedSQL, id: objDiff.id))
                     }
+                    // Apply destructive changes only when allowed
+                    if job.allowDropColumns && !objDiff.dropColumnSQL.isEmpty {
+                        let dropSQL = objDiff.dropColumnSQL.joined(separator: "\n")
+                        steps.append(.alterObject(sql: dropSQL, id: objDiff.id))
+                    } else if !objDiff.dropColumnSQL.isEmpty {
+                        logger.warning("Skipping \(objDiff.dropColumnSQL.count) destructive change(s) for \(objDiff.id) (use --allow-drop-columns)")
+                    }
                 }
 
                 // Handle objects only in target (optionally drop)
@@ -134,6 +141,12 @@ public struct SyncOrchestrator: Sendable {
                             let combinedSQL = objDiff.migrationSQL.joined(separator: "\n")
                             if !combinedSQL.isEmpty {
                                 steps.append(.alterObject(sql: combinedSQL, id: objDiff.id))
+                            }
+                            if job.allowDropColumns && !objDiff.dropColumnSQL.isEmpty {
+                                let dropSQL = objDiff.dropColumnSQL.joined(separator: "\n")
+                                steps.append(.alterObject(sql: dropSQL, id: objDiff.id))
+                            } else if !objDiff.dropColumnSQL.isEmpty {
+                                logger.warning("Skipping \(objDiff.dropColumnSQL.count) destructive change(s) for \(objDiff.id) (use --allow-drop-columns)")
                             }
                         }
 

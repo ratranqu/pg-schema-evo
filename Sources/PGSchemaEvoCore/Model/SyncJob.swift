@@ -9,6 +9,10 @@ public struct SyncJob: Sendable {
     public let dropExtra: Bool
     /// Drop objects before creating them (for objects only in source).
     public let dropIfExists: Bool
+    /// Allow dropping columns, constraints, indexes, triggers, and policies that exist
+    /// in the target but not in the source. Without this flag, destructive per-object
+    /// changes are reported but not applied.
+    public let allowDropColumns: Bool
     /// Skip interactive confirmation prompt.
     public let force: Bool
     /// Skip pre-flight validation checks.
@@ -25,6 +29,7 @@ public struct SyncJob: Sendable {
         dryRun: Bool = true,
         dropExtra: Bool = false,
         dropIfExists: Bool = false,
+        allowDropColumns: Bool = false,
         force: Bool = false,
         skipPreflight: Bool = false,
         syncAll: Bool = false,
@@ -36,6 +41,7 @@ public struct SyncJob: Sendable {
         self.dryRun = dryRun
         self.dropExtra = dropExtra
         self.dropIfExists = dropIfExists
+        self.allowDropColumns = allowDropColumns
         self.force = force
         self.skipPreflight = skipPreflight
         self.syncAll = syncAll
