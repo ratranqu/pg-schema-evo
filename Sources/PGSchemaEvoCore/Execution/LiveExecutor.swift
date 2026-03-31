@@ -71,12 +71,20 @@ public struct LiveExecutor: Sendable {
         // Phase 3: Execute the entire script in a single psql process
         progress.reportStep(steps.count, description: "Executing transaction")
 
-        let result = try await shell.run(
-            command: psqlPath,
-            arguments: [targetDSN, "--set", "ON_ERROR_STOP=1", "-X"],
-            environment: env,
-            input: script
-        )
+        SignalHandler.shared.setTransactionContext(true)
+        let result: ShellResult
+        do {
+            result = try await shell.run(
+                command: psqlPath,
+                arguments: [targetDSN, "--set", "ON_ERROR_STOP=1", "-X"],
+                environment: env,
+                input: script
+            )
+        } catch {
+            SignalHandler.shared.setTransactionContext(false)
+            throw error
+        }
+        SignalHandler.shared.setTransactionContext(false)
 
         guard result.succeeded else {
             // No explicit ROLLBACK needed — PostgreSQL automatically rolls back

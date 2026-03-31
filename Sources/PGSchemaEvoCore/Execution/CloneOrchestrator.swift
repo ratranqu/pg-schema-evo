@@ -254,6 +254,10 @@ public struct CloneOrchestrator: Sendable {
                 }
             }
 
+            // Install signal handlers for graceful shutdown during live execution
+            SignalHandler.shared.install()
+            defer { SignalHandler.shared.uninstall() }
+
             // Execute with retry
             let executor = LiveExecutor(logger: logger)
             try await executeWithRetry(executor: executor, steps: steps, job: job)
