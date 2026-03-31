@@ -69,6 +69,29 @@ RLS policies can be optionally cloned (`--rls` flag or `rls: true` in YAML). The
    f. If permissions requested: generate GRANT statements
 6. Output: dry-run → bash script to stdout; live → execute with transaction wrapping and retry
 
+## Roadmap
+
+### Completed
+
+| Phase | Description |
+|-------|-------------|
+| 1 | Table DDL cloning, dry-run mode, unit + integration tests, CI |
+| 2 | Views, matviews, sequences, enums, functions, procedures, schemas, roles, extensions, permissions, inspect/list commands, hybrid pg_dump introspection for exotic types |
+| 3 | YAML config files with env var interpolation, composite types, FK + view dependency resolution, progress output, Docker image, shell completions |
+| 4 | Schema diffing (`diff` command), selective data (WHERE/row limits), pre-flight validation (`check` command), declarative partitions, RLS policies, retry with rollback, code coverage in CI |
+
+### Future Work
+
+| Area | Description |
+|------|-------------|
+| Transaction isolation | Refactor `LiveExecutor` to use a single persistent `psql` session instead of spawning separate processes per step, enabling true transaction wrapping |
+| Signal handling | Graceful SIGINT/SIGTERM handling with rollback on interrupt |
+| Incremental sync | Detect what has changed since last clone and only transfer deltas |
+| Schema migration | Generate and apply ALTER statements from `diff` output instead of DROP/CREATE |
+| Conflict resolution | Interactive merge when target has diverged from source |
+| Performance | Parallel data transfer for independent tables, streaming COPY |
+| Observability | Structured JSON logging, OpenTelemetry traces for clone operations |
+
 ## Subcommands
 
 | Command | Description |
