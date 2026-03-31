@@ -43,4 +43,36 @@ struct FunctionSQLGeneratorTests {
         let sql = gen.generateDrop(for: id)
         #expect(sql.contains("DROP PROCEDURE IF EXISTS"))
     }
+
+    @Test("Definition already ending with semicolon is not doubled")
+    func definitionWithSemicolon() throws {
+        let id = ObjectIdentifier(type: .function, schema: "public", name: "noop")
+        let metadata = FunctionMetadata(
+            id: id,
+            definition: "CREATE FUNCTION public.noop() RETURNS void LANGUAGE sql AS '';",
+            language: "sql",
+            returnType: "void",
+            volatility: "VOLATILE",
+            argumentSignature: ""
+        )
+        let sql = try gen.generateCreate(from: metadata)
+        #expect(sql.hasSuffix(";"))
+        #expect(!sql.hasSuffix(";;"))
+    }
+
+    @Test("Wrong metadata type throws error")
+    func wrongMetadata() {
+        let id = ObjectIdentifier(type: .function, schema: "public", name: "f")
+        let metadata = EnumMetadata(id: id, labels: [])
+        #expect(throws: PGSchemaEvoError.self) {
+            try gen.generateCreate(from: metadata)
+        }
+    }
+
+    @Test("DROP FUNCTION without explicit signature defaults to ()")
+    func dropNoSignature() {
+        let id = ObjectIdentifier(type: .function, schema: "public", name: "f")
+        let sql = gen.generateDrop(for: id)
+        #expect(sql.contains("()"))
+    }
 }
