@@ -48,6 +48,9 @@ struct SyncCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Drop objects before creating (for objects only in source)")
     var dropExisting: Bool = false
 
+    @Flag(name: .long, help: "Allow dropping columns, constraints, indexes, triggers, and policies extra in target")
+    var allowDropColumns: Bool = false
+
     @Flag(name: .long, help: "Skip interactive confirmation prompt")
     var force: Bool = false
 
@@ -117,6 +120,7 @@ struct SyncCommand: AsyncParsableCommand {
             dryRun: dryRun,
             dropExtra: dropExtra,
             dropIfExists: dropExisting,
+            allowDropColumns: allowDropColumns,
             force: force,
             skipPreflight: skipPreflight,
             syncAll: syncAll,

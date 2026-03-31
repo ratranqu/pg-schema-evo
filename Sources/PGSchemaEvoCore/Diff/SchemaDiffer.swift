@@ -91,6 +91,7 @@ public struct SchemaDiffer: Sendable {
 
         var differences: [String] = []
         var migrationSQL: [String] = []
+        var dropColumnSQL: [String] = []
 
         // Compare columns
         let srcCols = Dictionary(uniqueKeysWithValues: srcMeta.columns.map { ($0.name, $0) })
@@ -126,6 +127,7 @@ public struct SchemaDiffer: Sendable {
 
         for (name, _) in tgtCols where srcCols[name] == nil {
             differences.append("Column \(name): extra in target (not in source)")
+            dropColumnSQL.append("ALTER TABLE \(id.qualifiedName) DROP COLUMN \(quoteIdent(name));")
         }
 
         // Compare constraints
@@ -139,6 +141,7 @@ public struct SchemaDiffer: Sendable {
         }
         for name in tgtConstraints.subtracting(srcConstraints) {
             differences.append("Constraint \(name): extra in target")
+            dropColumnSQL.append("ALTER TABLE \(id.qualifiedName) DROP CONSTRAINT \(quoteIdent(name));")
         }
 
         // Compare indexes
@@ -152,6 +155,72 @@ public struct SchemaDiffer: Sendable {
         }
         for name in tgtIndexes.subtracting(srcIndexes) {
             differences.append("Index \(name): extra in target")
+            dropColumnSQL.append("DROP INDEX \(id.schema.map { quoteIdent($0) + "." } ?? "")\(quoteIdent(name));")
+        }
+
+        // Compare triggers
+        let srcTriggers = Dictionary(uniqueKeysWithValues: srcMeta.triggers.map { ($0.name, $0) })
+        let tgtTriggers = Dictionary(uniqueKeysWithValues: tgtMeta.triggers.map { ($0.name, $0) })
+
+        for (name, srcTrigger) in srcTriggers {
+            if let tgtTrigger = tgtTriggers[name] {
+                if srcTrigger.definition != tgtTrigger.definition {
+                    differences.append("Trigger \(name): definition differs")
+                    migrationSQL.append("DROP TRIGGER \(quoteIdent(name)) ON \(id.qualifiedName);")
+                    migrationSQL.append("\(srcTrigger.definition);")
+                }
+            } else {
+                differences.append("Trigger \(name): missing in target")
+                migrationSQL.append("\(srcTrigger.definition);")
+            }
+        }
+        for (name, _) in tgtTriggers where srcTriggers[name] == nil {
+            differences.append("Trigger \(name): extra in target")
+            dropColumnSQL.append("DROP TRIGGER \(quoteIdent(name)) ON \(id.qualifiedName);")
+        }
+
+        // Compare RLS policies
+        let srcRLS = try await source.rlsPolicies(for: id)
+        let tgtRLS = try await target.rlsPolicies(for: id)
+
+        if srcRLS.isEnabled != tgtRLS.isEnabled {
+            if srcRLS.isEnabled {
+                differences.append("RLS: not enabled on target")
+                migrationSQL.append("ALTER TABLE \(id.qualifiedName) ENABLE ROW LEVEL SECURITY;")
+            } else {
+                differences.append("RLS: enabled on target but not on source")
+                dropColumnSQL.append("ALTER TABLE \(id.qualifiedName) DISABLE ROW LEVEL SECURITY;")
+            }
+        }
+
+        if srcRLS.isForced != tgtRLS.isForced {
+            if srcRLS.isForced {
+                differences.append("RLS: not forced on target")
+                migrationSQL.append("ALTER TABLE \(id.qualifiedName) FORCE ROW LEVEL SECURITY;")
+            } else {
+                differences.append("RLS: forced on target but not on source")
+                dropColumnSQL.append("ALTER TABLE \(id.qualifiedName) NO FORCE ROW LEVEL SECURITY;")
+            }
+        }
+
+        let srcPolicies = Dictionary(uniqueKeysWithValues: srcRLS.policies.map { ($0.name, $0) })
+        let tgtPolicies = Dictionary(uniqueKeysWithValues: tgtRLS.policies.map { ($0.name, $0) })
+
+        for (name, srcPolicy) in srcPolicies {
+            if let tgtPolicy = tgtPolicies[name] {
+                if srcPolicy.definition != tgtPolicy.definition {
+                    differences.append("RLS policy \(name): definition differs")
+                    migrationSQL.append("DROP POLICY \(quoteIdent(name)) ON \(id.qualifiedName);")
+                    migrationSQL.append("\(srcPolicy.definition);")
+                }
+            } else {
+                differences.append("RLS policy \(name): missing in target")
+                migrationSQL.append("\(srcPolicy.definition);")
+            }
+        }
+        for (name, _) in tgtPolicies where srcPolicies[name] == nil {
+            differences.append("RLS policy \(name): extra in target")
+            dropColumnSQL.append("DROP POLICY \(quoteIdent(name)) ON \(id.qualifiedName);")
         }
 
         guard !differences.isEmpty else { return nil }
@@ -159,7 +228,8 @@ public struct SchemaDiffer: Sendable {
         return ObjectDiff(
             id: id,
             differences: differences,
-            migrationSQL: migrationSQL
+            migrationSQL: migrationSQL,
+            dropColumnSQL: dropColumnSQL
         )
     }
 
@@ -481,7 +551,9 @@ public struct SchemaDiff: Sendable {
     }
 
     /// Render as a SQL migration script to bring target in sync with source.
-    public func renderMigrationSQL() -> String {
+    /// When `includeDestructive` is true, DROP COLUMN/CONSTRAINT/INDEX/TRIGGER/POLICY
+    /// statements and DROP TABLE/VIEW statements for objects only in target are included.
+    public func renderMigrationSQL(includeDestructive: Bool = false) -> String {
         var sql: [String] = []
 
         sql.append("-- pg-schema-evo migration script")
@@ -489,19 +561,58 @@ public struct SchemaDiff: Sendable {
         sql.append("BEGIN;")
         sql.append("")
 
-        // Modified objects first
+        // Modified objects: safe ALTER statements
         for objDiff in modified {
             sql.append("-- Modify \(objDiff.id)")
             sql.append(contentsOf: objDiff.migrationSQL)
             sql.append("")
         }
 
-        // Note: creating missing objects requires introspection of source DDL
-        // which is handled by the clone command. Here we just flag them.
+        // Modified objects: destructive DROP statements (gated)
+        if includeDestructive {
+            let destructiveDiffs = modified.filter { !$0.dropColumnSQL.isEmpty }
+            if !destructiveDiffs.isEmpty {
+                sql.append("-- Destructive changes (drop columns, constraints, indexes, triggers, policies)")
+                for objDiff in destructiveDiffs {
+                    sql.append("-- Drop extras from \(objDiff.id)")
+                    sql.append(contentsOf: objDiff.dropColumnSQL)
+                }
+                sql.append("")
+            }
+        } else {
+            let destructiveDiffs = modified.filter { !$0.dropColumnSQL.isEmpty }
+            if !destructiveDiffs.isEmpty {
+                sql.append("-- Destructive changes SKIPPED (use --allow-drop-columns to include):")
+                for objDiff in destructiveDiffs {
+                    for stmt in objDiff.dropColumnSQL {
+                        sql.append("-- \(stmt)")
+                    }
+                }
+                sql.append("")
+            }
+        }
+
+        // Objects only in source — need to be created
         if !onlyInSource.isEmpty {
-            sql.append("-- Objects missing in target (use 'clone' command to create):")
+            sql.append("-- Objects missing in target (use 'clone' or 'sync' command to create):")
             for id in onlyInSource {
                 sql.append("-- CREATE \(id)")
+            }
+            sql.append("")
+        }
+
+        // Objects only in target — optionally drop
+        if !onlyInTarget.isEmpty {
+            if includeDestructive {
+                sql.append("-- Drop objects only in target")
+                for id in onlyInTarget {
+                    sql.append("\(dropStatementFor(id))")
+                }
+            } else {
+                sql.append("-- Objects only in target (use --allow-drop-tables to drop):")
+                for id in onlyInTarget {
+                    sql.append("-- \(dropStatementFor(id))")
+                }
             }
             sql.append("")
         }
@@ -510,10 +621,39 @@ public struct SchemaDiff: Sendable {
 
         return sql.joined(separator: "\n")
     }
+
+    /// Generate a DROP statement for an object identifier.
+    private func dropStatementFor(_ id: ObjectIdentifier) -> String {
+        let keyword: String
+        switch id.type {
+        case .table: keyword = "TABLE"
+        case .view: keyword = "VIEW"
+        case .materializedView: keyword = "MATERIALIZED VIEW"
+        case .sequence: keyword = "SEQUENCE"
+        case .function: keyword = "FUNCTION"
+        case .procedure: keyword = "PROCEDURE"
+        case .enum, .compositeType: keyword = "TYPE"
+        case .schema: keyword = "SCHEMA"
+        case .extension: keyword = "EXTENSION"
+        default: keyword = "TABLE" // fallback
+        }
+        let name = id.type == .role ? id.name : id.qualifiedName
+        return "DROP \(keyword) IF EXISTS \(name) CASCADE;"
+    }
 }
 
 public struct ObjectDiff: Sendable {
     public let id: ObjectIdentifier
     public let differences: [String]
     public let migrationSQL: [String]
+    /// Destructive SQL that drops columns, constraints, or indexes from the target.
+    /// These are separated so that the SyncOrchestrator can gate them behind safety flags.
+    public let dropColumnSQL: [String]
+
+    public init(id: ObjectIdentifier, differences: [String], migrationSQL: [String], dropColumnSQL: [String] = []) {
+        self.id = id
+        self.differences = differences
+        self.migrationSQL = migrationSQL
+        self.dropColumnSQL = dropColumnSQL
+    }
 }

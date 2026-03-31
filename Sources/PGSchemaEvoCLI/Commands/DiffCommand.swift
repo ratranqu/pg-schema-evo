@@ -29,6 +29,9 @@ struct DiffCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Output SQL migration script instead of text diff")
     var sql: Bool = false
 
+    @Flag(name: .long, help: "Include destructive DROP statements in SQL output (columns, constraints, indexes, triggers, policies, objects)")
+    var includeDestructive: Bool = false
+
     @Flag(name: [.short, .long], help: "Enable verbose logging output")
     var verbose: Bool = false
 
@@ -72,7 +75,7 @@ struct DiffCommand: AsyncParsableCommand {
         )
 
         if sql {
-            print(result.renderMigrationSQL())
+            print(result.renderMigrationSQL(includeDestructive: includeDestructive))
         } else {
             print(result.renderText())
         }

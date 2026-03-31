@@ -199,8 +199,8 @@ llvm-cov report \
 
 | Metric | Value |
 |--------|-------|
-| Line coverage | **81.46%** (max 1% regression per PR) |
-| Test suites | 16 suites, 94 tests (unit + integration) |
+| Line coverage | **80.88%** (max 1% regression per PR) |
+| Test suites | 32 suites, 483 tests (unit + integration) |
 
 > Coverage is automatically updated in this README on each merge to main.
 
@@ -212,4 +212,4 @@ llvm-cov report \
 
 ## Status
 
-Version 0.3.0 — Incremental data sync (`data-sync` command) with timestamp/ID-based change detection, UPSERT via temp tables, optional delete detection, and YAML state file persistence. All prior core features: selective cloning with dry-run and live modes, dependency resolution, schema diffing, YAML config files, partitioned tables, RLS policies, selective data filters, pre-flight validation, and retry with rollback.
+Version 0.4.0 — Enhanced schema migration: `diff --sql` now produces complete migration scripts with DROP COLUMN/CONSTRAINT/INDEX support, trigger comparison (CREATE/DROP/replace), RLS policy comparison (ENABLE/DISABLE/FORCE, CREATE/DROP POLICY), and safety flags (`--include-destructive` for diff, `--allow-drop-columns` for sync). Destructive changes are reported but skipped by default. Prior: incremental data sync (`data-sync` command), selective cloning with dry-run and live modes, dependency resolution, schema diffing, YAML config files, partitioned tables, RLS policies, selective data filters, pre-flight validation, and retry with rollback.

@@ -980,6 +980,377 @@ struct SchemaDifferTests {
 
         #expect(result.modified.isEmpty)
     }
+
+    // MARK: - DROP column/constraint/index SQL
+
+    @Test("Extra column in target generates DROP COLUMN in dropColumnSQL")
+    func dropColumnSQL() async throws {
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "users")
+        let source = ConfigurableDiffIntrospector(objects: [tableId])
+        source.tables[tableId] = TableMetadata(id: tableId, columns: [
+            ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1),
+        ])
+        let target = ConfigurableDiffIntrospector(objects: [tableId])
+        target.tables[tableId] = TableMetadata(id: tableId, columns: [
+            ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1),
+            ColumnInfo(name: "legacy", dataType: "text", isNullable: true, ordinalPosition: 2),
+        ])
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].dropColumnSQL.contains { $0.contains("DROP COLUMN") && $0.contains("legacy") })
+        #expect(result.modified[0].migrationSQL.allSatisfy { !$0.contains("DROP COLUMN") })
+    }
+
+    @Test("Extra constraint in target generates DROP CONSTRAINT in dropColumnSQL")
+    func dropConstraintSQL() async throws {
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "orders")
+        let source = ConfigurableDiffIntrospector(objects: [tableId])
+        source.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)],
+            constraints: []
+        )
+        let target = ConfigurableDiffIntrospector(objects: [tableId])
+        target.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)],
+            constraints: [
+                ConstraintInfo(name: "orders_old_check", type: .check, definition: "CHECK (amount > 0)"),
+            ]
+        )
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].dropColumnSQL.contains { $0.contains("DROP CONSTRAINT") && $0.contains("orders_old_check") })
+    }
+
+    @Test("Extra index in target generates DROP INDEX in dropColumnSQL")
+    func dropIndexSQL() async throws {
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "orders")
+        let source = ConfigurableDiffIntrospector(objects: [tableId])
+        source.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)]
+        )
+        let target = ConfigurableDiffIntrospector(objects: [tableId])
+        target.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)],
+            indexes: [
+                IndexInfo(name: "idx_old", definition: "CREATE INDEX idx_old ON public.orders (old_col)", isUnique: false, isPrimary: false),
+            ]
+        )
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].dropColumnSQL.contains { $0.contains("DROP INDEX") && $0.contains("idx_old") })
+    }
+
+    // MARK: - Trigger comparison
+
+    @Test("Missing trigger in target generates CREATE TRIGGER")
+    func triggerMissingInTarget() async throws {
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "orders")
+        let source = ConfigurableDiffIntrospector(objects: [tableId])
+        source.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)],
+            triggers: [
+                TriggerInfo(name: "trg_audit", definition: "CREATE TRIGGER trg_audit AFTER INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION audit_log()"),
+            ]
+        )
+        let target = ConfigurableDiffIntrospector(objects: [tableId])
+        target.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)]
+        )
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].differences.contains { $0.contains("trg_audit") && $0.contains("missing in target") })
+        #expect(result.modified[0].migrationSQL.contains { $0.contains("CREATE TRIGGER trg_audit") })
+    }
+
+    @Test("Extra trigger in target generates DROP TRIGGER in dropColumnSQL")
+    func triggerExtraInTarget() async throws {
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "orders")
+        let source = ConfigurableDiffIntrospector(objects: [tableId])
+        source.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)]
+        )
+        let target = ConfigurableDiffIntrospector(objects: [tableId])
+        target.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)],
+            triggers: [
+                TriggerInfo(name: "trg_old", definition: "CREATE TRIGGER trg_old AFTER DELETE ON public.orders FOR EACH ROW EXECUTE FUNCTION cleanup()"),
+            ]
+        )
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].differences.contains { $0.contains("trg_old") && $0.contains("extra in target") })
+        #expect(result.modified[0].dropColumnSQL.contains { $0.contains("DROP TRIGGER") && $0.contains("trg_old") })
+    }
+
+    @Test("Trigger definition difference generates DROP+CREATE")
+    func triggerDefinitionDiffers() async throws {
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "orders")
+        let source = ConfigurableDiffIntrospector(objects: [tableId])
+        source.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)],
+            triggers: [
+                TriggerInfo(name: "trg_notify", definition: "CREATE TRIGGER trg_notify AFTER INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION notify_v2()"),
+            ]
+        )
+        let target = ConfigurableDiffIntrospector(objects: [tableId])
+        target.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)],
+            triggers: [
+                TriggerInfo(name: "trg_notify", definition: "CREATE TRIGGER trg_notify AFTER INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION notify_v1()"),
+            ]
+        )
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].differences.contains { $0.contains("trg_notify") && $0.contains("definition differs") })
+        let sql = result.modified[0].migrationSQL.joined(separator: "\n")
+        #expect(sql.contains("DROP TRIGGER"))
+        #expect(sql.contains("notify_v2"))
+    }
+
+    // MARK: - RLS policy comparison
+
+    @Test("RLS enabled on source but not target generates ENABLE RLS")
+    func rlsEnableOnTarget() async throws {
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "secrets")
+        let source = ConfigurableDiffIntrospector(objects: [tableId])
+        source.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)]
+        )
+        source.rlsInfos[tableId] = RLSInfo(isEnabled: true)
+        let target = ConfigurableDiffIntrospector(objects: [tableId])
+        target.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)]
+        )
+        target.rlsInfos[tableId] = RLSInfo(isEnabled: false)
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].differences.contains { $0.contains("RLS") && $0.contains("not enabled") })
+        #expect(result.modified[0].migrationSQL.contains { $0.contains("ENABLE ROW LEVEL SECURITY") })
+    }
+
+    @Test("RLS enabled on target but not source generates DISABLE RLS in dropColumnSQL")
+    func rlsDisableOnTarget() async throws {
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "secrets")
+        let source = ConfigurableDiffIntrospector(objects: [tableId])
+        source.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)]
+        )
+        source.rlsInfos[tableId] = RLSInfo(isEnabled: false)
+        let target = ConfigurableDiffIntrospector(objects: [tableId])
+        target.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)]
+        )
+        target.rlsInfos[tableId] = RLSInfo(isEnabled: true)
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].dropColumnSQL.contains { $0.contains("DISABLE ROW LEVEL SECURITY") })
+    }
+
+    @Test("RLS forced on source but not target generates FORCE RLS")
+    func rlsForceOnTarget() async throws {
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "secrets")
+        let source = ConfigurableDiffIntrospector(objects: [tableId])
+        source.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)]
+        )
+        source.rlsInfos[tableId] = RLSInfo(isEnabled: true, isForced: true)
+        let target = ConfigurableDiffIntrospector(objects: [tableId])
+        target.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)]
+        )
+        target.rlsInfos[tableId] = RLSInfo(isEnabled: true, isForced: false)
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].migrationSQL.contains { $0.contains("FORCE ROW LEVEL SECURITY") })
+    }
+
+    @Test("RLS policy missing in target generates CREATE POLICY")
+    func rlsPolicyMissingInTarget() async throws {
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "secrets")
+        let source = ConfigurableDiffIntrospector(objects: [tableId])
+        source.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)]
+        )
+        source.rlsInfos[tableId] = RLSInfo(isEnabled: true, policies: [
+            RLSPolicy(name: "user_access", definition: "CREATE POLICY user_access ON public.secrets FOR SELECT USING (user_id = current_user_id())"),
+        ])
+        let target = ConfigurableDiffIntrospector(objects: [tableId])
+        target.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)]
+        )
+        target.rlsInfos[tableId] = RLSInfo(isEnabled: true)
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].differences.contains { $0.contains("user_access") && $0.contains("missing in target") })
+        #expect(result.modified[0].migrationSQL.contains { $0.contains("CREATE POLICY user_access") })
+    }
+
+    @Test("RLS policy extra in target generates DROP POLICY in dropColumnSQL")
+    func rlsPolicyExtraInTarget() async throws {
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "secrets")
+        let source = ConfigurableDiffIntrospector(objects: [tableId])
+        source.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)]
+        )
+        source.rlsInfos[tableId] = RLSInfo(isEnabled: true)
+        let target = ConfigurableDiffIntrospector(objects: [tableId])
+        target.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)]
+        )
+        target.rlsInfos[tableId] = RLSInfo(isEnabled: true, policies: [
+            RLSPolicy(name: "old_policy", definition: "CREATE POLICY old_policy ON public.secrets FOR ALL USING (true)"),
+        ])
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].dropColumnSQL.contains { $0.contains("DROP POLICY") && $0.contains("old_policy") })
+    }
+
+    @Test("RLS policy definition differs generates DROP+CREATE")
+    func rlsPolicyDefinitionDiffers() async throws {
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "secrets")
+        let source = ConfigurableDiffIntrospector(objects: [tableId])
+        source.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)]
+        )
+        source.rlsInfos[tableId] = RLSInfo(isEnabled: true, policies: [
+            RLSPolicy(name: "access", definition: "CREATE POLICY access ON public.secrets USING (role = 'admin')"),
+        ])
+        let target = ConfigurableDiffIntrospector(objects: [tableId])
+        target.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)]
+        )
+        target.rlsInfos[tableId] = RLSInfo(isEnabled: true, policies: [
+            RLSPolicy(name: "access", definition: "CREATE POLICY access ON public.secrets USING (role = 'user')"),
+        ])
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].differences.contains { $0.contains("access") && $0.contains("definition differs") })
+        let sql = result.modified[0].migrationSQL.joined(separator: "\n")
+        #expect(sql.contains("DROP POLICY"))
+        #expect(sql.contains("role = 'admin'"))
+    }
+
+    // MARK: - renderMigrationSQL enhancements
+
+    @Test("renderMigrationSQL shows destructive changes as comments by default")
+    func renderMigrationSQLDestructiveSkipped() async throws {
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "users")
+        let source = ConfigurableDiffIntrospector(objects: [tableId])
+        source.tables[tableId] = TableMetadata(id: tableId, columns: [
+            ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1),
+        ])
+        let target = ConfigurableDiffIntrospector(objects: [tableId])
+        target.tables[tableId] = TableMetadata(id: tableId, columns: [
+            ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1),
+            ColumnInfo(name: "old_col", dataType: "text", isNullable: true, ordinalPosition: 2),
+        ])
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        let sql = result.renderMigrationSQL()
+        #expect(sql.contains("-- Destructive changes SKIPPED"))
+        #expect(sql.contains("-- ALTER TABLE"))
+        #expect(sql.contains("DROP COLUMN"))
+    }
+
+    @Test("renderMigrationSQL includes destructive changes when flag is set")
+    func renderMigrationSQLDestructiveIncluded() async throws {
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "users")
+        let source = ConfigurableDiffIntrospector(objects: [tableId])
+        source.tables[tableId] = TableMetadata(id: tableId, columns: [
+            ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1),
+        ])
+        let target = ConfigurableDiffIntrospector(objects: [tableId])
+        target.tables[tableId] = TableMetadata(id: tableId, columns: [
+            ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1),
+            ColumnInfo(name: "old_col", dataType: "text", isNullable: true, ordinalPosition: 2),
+        ])
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        let sql = result.renderMigrationSQL(includeDestructive: true)
+        #expect(sql.contains("ALTER TABLE"))
+        #expect(sql.contains("DROP COLUMN"))
+        #expect(!sql.contains("SKIPPED"))
+    }
+
+    @Test("renderMigrationSQL includes DROP for objects only in target when destructive")
+    func renderMigrationSQLDropOnlyInTarget() async throws {
+        let source = ConfigurableDiffIntrospector(objects: [])
+        let target = ConfigurableDiffIntrospector(objects: [
+            ObjectIdentifier(type: .table, schema: "public", name: "orphan"),
+        ])
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        let sqlDefault = result.renderMigrationSQL()
+        #expect(sqlDefault.contains("-- DROP TABLE IF EXISTS"))
+
+        let sqlDestructive = result.renderMigrationSQL(includeDestructive: true)
+        #expect(sqlDestructive.contains("DROP TABLE IF EXISTS"))
+        #expect(!sqlDestructive.contains("-- DROP TABLE IF EXISTS"))
+    }
 }
 
 /// Mock introspector for diff tests that returns canned object lists.
@@ -1115,6 +1486,11 @@ private final class ConfigurableDiffIntrospector: SchemaIntrospector, @unchecked
     var roles: [ObjectIdentifier: RoleMetadata] = [:]
     var compositeTypes: [ObjectIdentifier: CompositeTypeMetadata] = [:]
     var extensions: [ObjectIdentifier: ExtensionMetadata] = [:]
+    var rlsInfos: [ObjectIdentifier: RLSInfo] = [:]
+
+    func rlsPolicies(for id: ObjectIdentifier) async throws -> RLSInfo {
+        rlsInfos[id] ?? RLSInfo()
+    }
 
     func describeSchema(_ id: ObjectIdentifier) async throws -> SchemaMetadata {
         guard let meta = schemas[id] else {
@@ -1143,7 +1519,6 @@ private final class ConfigurableDiffIntrospector: SchemaIntrospector, @unchecked
     func relationSize(_ id: ObjectIdentifier) async throws -> Int? { nil }
     func permissions(for id: ObjectIdentifier) async throws -> [PermissionGrant] { [] }
     func dependencies(for id: ObjectIdentifier) async throws -> [ObjectIdentifier] { [] }
-    func rlsPolicies(for id: ObjectIdentifier) async throws -> RLSInfo { RLSInfo() }
     func partitionInfo(for id: ObjectIdentifier) async throws -> PartitionInfo? { nil }
     func listPartitions(for id: ObjectIdentifier) async throws -> [PartitionChild] { [] }
     func primaryKeyColumns(for id: ObjectIdentifier) async throws -> [String] { [] }
