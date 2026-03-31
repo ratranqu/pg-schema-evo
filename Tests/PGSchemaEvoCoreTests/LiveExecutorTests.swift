@@ -9,6 +9,10 @@ struct LiveExecutorTests {
         LiveExecutor(logger: Logger(label: "test"))
     }
 
+    private func qn(schema: String, name: String) -> String {
+        "\"\(schema)\".\"\(name)\""
+    }
+
     // MARK: - buildTransactionScript
 
     @Test("Empty steps produce BEGIN/COMMIT only")
@@ -22,13 +26,14 @@ struct LiveExecutorTests {
     func createStep() {
         let executor = makeExecutor()
         let id = ObjectIdentifier(type: .table, schema: "public", name: "users")
+        let sql = "CREATE TABLE \(qn(schema: "public", name: "users")) (id int);"
         let steps: [CloneStep] = [
-            .createObject(sql: "CREATE TABLE public.users (id int);", id: id),
+            .createObject(sql: sql, id: id),
         ]
         let script = executor.buildTransactionScript(steps: steps, prefetchedData: [:])
         #expect(script.hasPrefix("BEGIN;\n"))
         #expect(script.hasSuffix("COMMIT;\n"))
-        #expect(script.contains("CREATE TABLE public.users (id int);"))
+        #expect(script.contains(sql))
     }
 
     @Test("DROP step generates correct SQL in script")
@@ -37,7 +42,7 @@ struct LiveExecutorTests {
         let id = ObjectIdentifier(type: .table, schema: "public", name: "users")
         let steps: [CloneStep] = [.dropObject(id)]
         let script = executor.buildTransactionScript(steps: steps, prefetchedData: [:])
-        #expect(script.contains("DROP TABLE IF EXISTS public.users CASCADE;"))
+        #expect(script.contains("DROP TABLE IF EXISTS \(qn(schema: "public", name: "users")) CASCADE;"))
     }
 
     @Test("COPY data is inlined with COPY FROM STDIN")
@@ -49,7 +54,7 @@ struct LiveExecutorTests {
         ]
         let csvData = "id,name\n1,Alice\n2,Bob\n"
         let script = executor.buildTransactionScript(steps: steps, prefetchedData: [0: csvData])
-        #expect(script.contains("COPY public.users FROM STDIN WITH (FORMAT csv, HEADER);"))
+        #expect(script.contains("COPY \(qn(schema: "public", name: "users")) FROM STDIN WITH (FORMAT csv, HEADER);"))
         #expect(script.contains("1,Alice"))
         #expect(script.contains("2,Bob"))
         #expect(script.contains("\\.\n"))
@@ -68,7 +73,7 @@ struct LiveExecutorTests {
         #expect(script.contains("COPY public.users (id, name) FROM stdin;"))
         #expect(script.contains("1\tAlice"))
         // Should NOT wrap in additional COPY FROM STDIN
-        #expect(!script.contains("COPY public.users FROM STDIN WITH (FORMAT csv, HEADER);"))
+        #expect(!script.contains("FROM STDIN WITH (FORMAT csv, HEADER);"))
     }
 
     @Test("Empty COPY data is skipped")
@@ -79,7 +84,7 @@ struct LiveExecutorTests {
             .copyData(id: id, method: .copy, estimatedSize: nil),
         ]
         let script = executor.buildTransactionScript(steps: steps, prefetchedData: [0: ""])
-        #expect(!script.contains("COPY public.users FROM STDIN"))
+        #expect(!script.contains("FROM STDIN"))
     }
 
     @Test("Missing prefetched data is handled")
@@ -90,7 +95,7 @@ struct LiveExecutorTests {
             .copyData(id: id, method: .copy, estimatedSize: nil),
         ]
         let script = executor.buildTransactionScript(steps: steps, prefetchedData: [:])
-        #expect(!script.contains("COPY public.users FROM STDIN"))
+        #expect(!script.contains("FROM STDIN"))
     }
 
     @Test("GRANT permissions step is included")
@@ -110,7 +115,7 @@ struct LiveExecutorTests {
         let id = ObjectIdentifier(type: .materializedView, schema: "public", name: "mv_stats")
         let steps: [CloneStep] = [.refreshMaterializedView(id)]
         let script = executor.buildTransactionScript(steps: steps, prefetchedData: [:])
-        #expect(script.contains("REFRESH MATERIALIZED VIEW public.mv_stats;"))
+        #expect(script.contains("REFRESH MATERIALIZED VIEW \(qn(schema: "public", name: "mv_stats"));"))
     }
 
     @Test("Enable RLS step is included")
@@ -152,7 +157,7 @@ struct LiveExecutorTests {
         let beginIdx = script.range(of: "BEGIN;")!.lowerBound
         let createTypeIdx = script.range(of: "CREATE TYPE")!.lowerBound
         let createTableIdx = script.range(of: "CREATE TABLE")!.lowerBound
-        let copyIdx = script.range(of: "COPY public.users FROM STDIN")!.lowerBound
+        let copyIdx = script.range(of: "FROM STDIN WITH (FORMAT csv, HEADER);")!.lowerBound
         let grantIdx = script.range(of: "GRANT SELECT")!.lowerBound
         let commitIdx = script.range(of: "COMMIT;")!.lowerBound
 
@@ -168,7 +173,7 @@ struct LiveExecutorTests {
         let executor = makeExecutor()
         let id = ObjectIdentifier(type: .table, schema: "public", name: "users")
         let steps: [CloneStep] = [
-            .createObject(sql: "CREATE TABLE public.users (id int);", id: id),
+            .createObject(sql: "CREATE TABLE t (id int);", id: id),
         ]
         let script = executor.buildTransactionScript(steps: steps, prefetchedData: [:])
         #expect(script.contains("-- Step 1:"))
@@ -193,6 +198,6 @@ struct LiveExecutorTests {
         let id = ObjectIdentifier(type: .function, schema: "public", name: "my_func", signature: "(integer, text)")
         let steps: [CloneStep] = [.dropObject(id)]
         let script = executor.buildTransactionScript(steps: steps, prefetchedData: [:])
-        #expect(script.contains("DROP FUNCTION IF EXISTS public.my_func(integer, text) CASCADE;"))
+        #expect(script.contains("DROP FUNCTION IF EXISTS \(qn(schema: "public", name: "my_func"))(integer, text) CASCADE;"))
     }
 }
