@@ -212,4 +212,4 @@ llvm-cov report \
 
 ## Status
 
-Version 0.2.0 — All core features implemented: selective cloning with dry-run and live modes, dependency resolution, schema diffing, YAML config files, partitioned tables, RLS policies, selective data filters, pre-flight validation, and retry with rollback.
+Version 0.3.0 — Incremental data sync (`data-sync` command) with timestamp/ID-based change detection, UPSERT via temp tables, optional delete detection, and YAML state file persistence. All prior core features: selective cloning with dry-run and live modes, dependency resolution, schema diffing, YAML config files, partitioned tables, RLS policies, selective data filters, pre-flight validation, and retry with rollback.

@@ -175,6 +175,49 @@ struct ErrorTests {
         #expect(desc!.contains("Pre-flight"))
     }
 
+    // MARK: - Data Sync Errors
+
+    @Test("noPrimaryKey includes table identifier")
+    func noPrimaryKey() {
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "events")
+        let error = PGSchemaEvoError.noPrimaryKey(id)
+        let desc = error.errorDescription
+        #expect(desc != nil)
+        #expect(desc!.contains("events"))
+        #expect(desc!.contains("primary key"))
+    }
+
+    @Test("trackingColumnNotFound includes table and column")
+    func trackingColumnNotFound() {
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "orders")
+        let error = PGSchemaEvoError.trackingColumnNotFound(table: id, column: "modified_at")
+        let desc = error.errorDescription
+        #expect(desc != nil)
+        #expect(desc!.contains("orders"))
+        #expect(desc!.contains("modified_at"))
+    }
+
+    @Test("syncStateFileNotFound includes path")
+    func syncStateFileNotFound() {
+        let error = PGSchemaEvoError.syncStateFileNotFound(path: "/tmp/state.yaml")
+        let desc = error.errorDescription
+        #expect(desc != nil)
+        #expect(desc!.contains("/tmp/state.yaml"))
+        #expect(desc!.contains("data-sync init"))
+    }
+
+    @Test("syncStateCorrupted includes path and underlying error")
+    func syncStateCorrupted() {
+        let error = PGSchemaEvoError.syncStateCorrupted(
+            path: "state.yaml",
+            underlying: "invalid YAML"
+        )
+        let desc = error.errorDescription
+        #expect(desc != nil)
+        #expect(desc!.contains("state.yaml"))
+        #expect(desc!.contains("invalid YAML"))
+    }
+
     // MARK: - Validation Errors
 
     @Test("invalidObjectSpec includes message")

@@ -30,6 +30,12 @@ public enum PGSchemaEvoError: Error, LocalizedError, Sendable {
     // Pre-flight
     case preflightFailed(checks: [String])
 
+    // Data Sync
+    case noPrimaryKey(ObjectIdentifier)
+    case trackingColumnNotFound(table: ObjectIdentifier, column: String)
+    case syncStateFileNotFound(path: String)
+    case syncStateCorrupted(path: String, underlying: String)
+
     // Validation
     case invalidObjectSpec(String)
     case invalidDSN(String)
@@ -64,6 +70,14 @@ public enum PGSchemaEvoError: Error, LocalizedError, Sendable {
             "Undefined environment variable: ${\(name)}"
         case .preflightFailed(let checks):
             "Pre-flight checks failed:\n\(checks.map { "  - \($0)" }.joined(separator: "\n"))"
+        case .noPrimaryKey(let id):
+            "Table \(id) has no primary key, required for incremental data sync"
+        case .trackingColumnNotFound(let table, let column):
+            "Tracking column '\(column)' not found in table \(table)"
+        case .syncStateFileNotFound(let path):
+            "Sync state file not found: \(path). Run 'data-sync init' first."
+        case .syncStateCorrupted(let path, let underlying):
+            "Failed to parse sync state file '\(path)': \(underlying)"
         case .invalidObjectSpec(let message):
             "Invalid object specifier: \(message)"
         case .invalidDSN(let message):
