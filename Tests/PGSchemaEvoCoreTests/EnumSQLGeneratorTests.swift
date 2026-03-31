@@ -32,4 +32,29 @@ struct EnumSQLGeneratorTests {
         #expect(sql.contains("DROP TYPE IF EXISTS"))
         #expect(sql.contains("CASCADE"))
     }
+
+    @Test("Wrong metadata type throws error")
+    func wrongMetadataThrows() {
+        let id = ObjectIdentifier(type: .enum, schema: "public", name: "e")
+        let metadata = SchemaMetadata(id: id, owner: "postgres")
+        #expect(throws: PGSchemaEvoError.self) {
+            try gen.generateCreate(from: metadata)
+        }
+    }
+
+    @Test("DROP TYPE format")
+    func dropTypeFormat() {
+        let id = ObjectIdentifier(type: .enum, schema: "myschema", name: "color")
+        let sql = gen.generateDrop(for: id)
+        #expect(sql == "DROP TYPE IF EXISTS \"myschema\".\"color\" CASCADE;")
+    }
+
+    @Test("Enum with single label")
+    func singleLabelEnum() throws {
+        let id = ObjectIdentifier(type: .enum, schema: "public", name: "single")
+        let metadata = EnumMetadata(id: id, labels: ["only_value"])
+        let sql = try gen.generateCreate(from: metadata)
+        #expect(sql.contains("'only_value'"))
+        #expect(sql.contains("AS ENUM"))
+    }
 }

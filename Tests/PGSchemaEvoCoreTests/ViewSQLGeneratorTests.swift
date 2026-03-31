@@ -54,4 +54,75 @@ struct ViewSQLGeneratorTests {
         let sql = gen.generateDrop(for: id)
         #expect(sql.contains("DROP MATERIALIZED VIEW IF EXISTS"))
     }
+
+    @Test("Wrong metadata type throws error")
+    func wrongMetadataThrows() {
+        let id = ObjectIdentifier(type: .view, schema: "public", name: "v")
+        let metadata = EnumMetadata(id: id, labels: ["x"])
+        #expect(throws: PGSchemaEvoError.self) {
+            try gen.generateCreate(from: metadata)
+        }
+    }
+
+    @Test("Materialized view without indexes produces no CREATE INDEX")
+    func materializedViewNoIndexes() throws {
+        let id = ObjectIdentifier(type: .materializedView, schema: "public", name: "mv_simple")
+        let metadata = MaterializedViewMetadata(
+            id: id,
+            definition: " SELECT 1 AS val"
+        )
+        let sql = try gen.generateCreate(from: metadata)
+        #expect(sql.contains("CREATE MATERIALIZED VIEW"))
+        #expect(sql.contains("WITH DATA"))
+        #expect(!sql.contains("CREATE INDEX"))
+    }
+
+    @Test("Materialized view with multiple indexes")
+    func materializedViewMultipleIndexes() throws {
+        let id = ObjectIdentifier(type: .materializedView, schema: "reporting", name: "mv_report")
+        let metadata = MaterializedViewMetadata(
+            id: id,
+            definition: " SELECT id, name, created_at FROM users",
+            indexes: [
+                IndexInfo(
+                    name: "idx_mv_report_id",
+                    definition: "CREATE UNIQUE INDEX idx_mv_report_id ON reporting.mv_report USING btree (id)",
+                    isUnique: true,
+                    isPrimary: false
+                ),
+                IndexInfo(
+                    name: "idx_mv_report_created_at",
+                    definition: "CREATE INDEX idx_mv_report_created_at ON reporting.mv_report USING btree (created_at)",
+                    isUnique: false,
+                    isPrimary: false
+                ),
+            ]
+        )
+        let sql = try gen.generateCreate(from: metadata)
+        #expect(sql.contains("CREATE UNIQUE INDEX idx_mv_report_id"))
+        #expect(sql.contains("CREATE INDEX idx_mv_report_created_at"))
+    }
+
+    @Test("DROP VIEW for non-materialized view type")
+    func dropRegularViewFormat() {
+        let id = ObjectIdentifier(type: .view, schema: "public", name: "my_view")
+        let sql = gen.generateDrop(for: id)
+        #expect(sql == "DROP VIEW IF EXISTS \"public\".\"my_view\" CASCADE;")
+        #expect(!sql.contains("MATERIALIZED"))
+    }
+
+    @Test("DROP MATERIALIZED VIEW format")
+    func dropMaterializedViewFormat() {
+        let id = ObjectIdentifier(type: .materializedView, schema: "analytics", name: "mv_test")
+        let sql = gen.generateDrop(for: id)
+        #expect(sql == "DROP MATERIALIZED VIEW IF EXISTS \"analytics\".\"mv_test\" CASCADE;")
+    }
+
+    @Test("DROP for table type defaults to VIEW")
+    func dropDefaultsToView() {
+        // The default branch in generateDrop handles non-materializedView types
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "t")
+        let sql = gen.generateDrop(for: id)
+        #expect(sql.contains("DROP VIEW IF EXISTS"))
+    }
 }

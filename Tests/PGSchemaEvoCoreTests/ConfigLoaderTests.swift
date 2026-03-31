@@ -329,6 +329,313 @@ struct ConfigLoaderTests {
         #expect(job.objects.count == 1)
     }
 
+    // MARK: - WHERE clause and rowLimit
+
+    @Test("Config with WHERE clause and rowLimit on objects")
+    func whereClauseAndRowLimit() throws {
+        let yaml = """
+            source:
+              host: db.host
+              database: mydb
+              username: user
+            target:
+              host: localhost
+              database: devdb
+              username: admin
+            objects:
+              - type: table
+                schema: public
+                name: users
+                where: "active = true"
+                row_limit: 500
+              - type: table
+                schema: public
+                name: orders
+                row_limit: 1000
+            """
+        let path = try writeTempFile(yaml)
+        let config = try loader.load(path: path)
+
+        #expect(config.objects[0].whereClause == "active = true")
+        #expect(config.objects[0].rowLimit == 500)
+        #expect(config.objects[1].whereClause == nil)
+        #expect(config.objects[1].rowLimit == 1000)
+    }
+
+    // MARK: - RLS enabled
+
+    @Test("Config with RLS enabled on object")
+    func rlsEnabled() throws {
+        let yaml = """
+            source:
+              host: db.host
+              database: mydb
+              username: user
+            target:
+              host: localhost
+              database: devdb
+              username: admin
+            objects:
+              - type: table
+                schema: public
+                name: users
+                rls: true
+              - type: table
+                schema: public
+                name: orders
+            """
+        let path = try writeTempFile(yaml)
+        let config = try loader.load(path: path)
+
+        #expect(config.objects[0].copyRLSPolicies == true)
+        #expect(config.objects[1].copyRLSPolicies == false)
+    }
+
+    // MARK: - Force override
+
+    @Test("Config with force override via CLI")
+    func forceOverride() throws {
+        let yaml = """
+            source:
+              host: db.host
+              database: mydb
+              username: user
+            target:
+              host: localhost
+              database: devdb
+              username: admin
+            objects:
+              - type: table
+                schema: public
+                name: users
+            """
+        let path = try writeTempFile(yaml)
+        let overrides = ConfigOverrides(force: true)
+        let config = try loader.load(path: path, overrides: overrides)
+
+        #expect(config.force == true)
+    }
+
+    // MARK: - Missing target section
+
+    @Test("Missing target section throws error")
+    func missingTargetThrows() throws {
+        let yaml = """
+            source:
+              host: db.host
+              database: mydb
+              username: user
+            objects:
+              - type: table
+                schema: public
+                name: users
+            """
+        let path = try writeTempFile(yaml)
+        #expect(throws: PGSchemaEvoError.self) {
+            try loader.load(path: path)
+        }
+    }
+
+    // MARK: - Missing object name
+
+    @Test("Missing object name throws error")
+    func missingObjectNameThrows() throws {
+        let yaml = """
+            source:
+              host: db.host
+              database: mydb
+              username: user
+            target:
+              host: localhost
+              database: devdb
+              username: admin
+            objects:
+              - type: table
+                schema: public
+            """
+        let path = try writeTempFile(yaml)
+        #expect(throws: PGSchemaEvoError.self) {
+            try loader.load(path: path)
+        }
+    }
+
+    // MARK: - Missing object type
+
+    @Test("Missing object type throws error")
+    func missingObjectTypeThrows() throws {
+        let yaml = """
+            source:
+              host: db.host
+              database: mydb
+              username: user
+            target:
+              host: localhost
+              database: devdb
+              username: admin
+            objects:
+              - schema: public
+                name: users
+            """
+        let path = try writeTempFile(yaml)
+        #expect(throws: PGSchemaEvoError.self) {
+            try loader.load(path: path)
+        }
+    }
+
+    // MARK: - Empty objects array
+
+    @Test("Empty objects array throws error")
+    func emptyObjectsThrows() throws {
+        let yaml = """
+            source:
+              host: db.host
+              database: mydb
+              username: user
+            target:
+              host: localhost
+              database: devdb
+              username: admin
+            objects: []
+            """
+        let path = try writeTempFile(yaml)
+        #expect(throws: PGSchemaEvoError.self) {
+            try loader.load(path: path)
+        }
+    }
+
+    // MARK: - CloneJobConfig.toCloneJob preserves all fields
+
+    @Test("toCloneJob preserves all fields correctly")
+    func toCloneJobPreservesAllFields() throws {
+        let yaml = """
+            source:
+              host: prod-db
+              database: mydb
+              username: user
+              password: secret
+            target:
+              host: localhost
+              database: devdb
+              username: admin
+              password: devpass
+            defaults:
+              permissions: true
+              data: true
+              cascade: true
+              data_method: pgdump
+              data_threshold_mb: 250
+              drop_existing: true
+            objects:
+              - type: table
+                schema: public
+                name: users
+                where: "id > 100"
+                row_limit: 5000
+                rls: true
+            """
+        let path = try writeTempFile(yaml)
+        let overrides = ConfigOverrides(dryRun: true, force: true)
+        let config = try loader.load(path: path, overrides: overrides)
+        let job = config.toCloneJob()
+
+        #expect(job.source.host == "prod-db")
+        #expect(job.source.database == "mydb")
+        #expect(job.target.host == "localhost")
+        #expect(job.target.database == "devdb")
+        #expect(job.dryRun == true)
+        #expect(job.defaultDataMethod == .pgDump)
+        #expect(job.dataSizeThreshold == 250 * 1024 * 1024)
+        #expect(job.dropIfExists == true)
+        #expect(job.objects.count == 1)
+        #expect(job.objects[0].copyPermissions == true)
+        #expect(job.objects[0].copyData == true)
+        #expect(job.objects[0].cascadeDependencies == true)
+        #expect(job.objects[0].whereClause == "id > 100")
+        #expect(job.objects[0].rowLimit == 5000)
+        #expect(job.objects[0].copyRLSPolicies == true)
+    }
+
+    // MARK: - ConfigOverrides with all fields set
+
+    @Test("ConfigOverrides with all fields override config values")
+    func allOverridesApplied() throws {
+        let yaml = """
+            source:
+              host: db.host
+              database: mydb
+              username: user
+            target:
+              host: localhost
+              database: devdb
+              username: admin
+            defaults:
+              permissions: false
+              data: false
+              cascade: false
+              data_method: copy
+              data_threshold_mb: 50
+              drop_existing: false
+            objects:
+              - type: table
+                schema: public
+                name: users
+            """
+        let path = try writeTempFile(yaml)
+        let overrides = ConfigOverrides(
+            dryRun: true,
+            data: true,
+            permissions: true,
+            cascade: true,
+            dataMethod: .pgDump,
+            dataThresholdMB: 999,
+            dropExisting: true,
+            force: true
+        )
+        let config = try loader.load(path: path, overrides: overrides)
+
+        #expect(config.dryRun == true)
+        #expect(config.force == true)
+        #expect(config.defaultDataMethod == .pgDump)
+        #expect(config.dataSizeThresholdMB == 999)
+        #expect(config.dropIfExists == true)
+        // Object-level defaults from overrides
+        #expect(config.objects[0].copyPermissions == true)
+        #expect(config.objects[0].copyData == true)
+        #expect(config.objects[0].cascadeDependencies == true)
+    }
+
+    // MARK: - Non-data-supporting object ignores data default
+
+    @Test("Non-data-supporting object ignores data default")
+    func nonDataObjectIgnoresDataDefault() throws {
+        let yaml = """
+            source:
+              host: db.host
+              database: mydb
+              username: user
+            target:
+              host: localhost
+              database: devdb
+              username: admin
+            defaults:
+              data: true
+            objects:
+              - type: function
+                schema: public
+                name: my_func
+              - type: table
+                schema: public
+                name: users
+            """
+        let path = try writeTempFile(yaml)
+        let config = try loader.load(path: path)
+
+        // function does not support data, so copyData should be false
+        #expect(config.objects[0].copyData == false)
+        // table supports data, so it gets the default
+        #expect(config.objects[1].copyData == true)
+    }
+
     // MARK: - Helper
 
     private func writeTempFile(_ content: String) throws -> String {
