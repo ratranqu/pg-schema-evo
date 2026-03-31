@@ -234,6 +234,140 @@ struct DependencyResolverCascadeTests {
         #expect(cIndex < aIndex)
         #expect(cIndex < bIndex)
     }
+
+    @Test("Cascade with mixed type dependencies respects topological order over type order")
+    func cascadeMixedTypes() async throws {
+        // A table depends on an enum type
+        let tbl = ObjectIdentifier(type: .table, schema: "public", name: "orders")
+        let enm = ObjectIdentifier(type: .enum, schema: "public", name: "order_status")
+
+        let introspector = ConfigurableMockIntrospector(dependencyMap: [
+            tbl: [enm],
+            enm: [],
+        ])
+
+        let specs = [ObjectSpec(id: tbl)]
+        let result = try await resolver.resolve(objects: specs, introspector: introspector, cascade: true)
+
+        let names = result.map(\.id.name)
+        #expect(names == ["order_status", "orders"])
+    }
+
+    @Test("Cascade with explicitly provided spec preserves original spec over discovered spec")
+    func cascadeExplicitSpecPreserved() async throws {
+        // Both A and B are explicitly specified, A depends on B
+        // B's explicit spec has copyData=true, the dependency discovery should not overwrite it
+        let a = ObjectIdentifier(type: .table, schema: "public", name: "a")
+        let b = ObjectIdentifier(type: .table, schema: "public", name: "b")
+
+        let introspector = ConfigurableMockIntrospector(dependencyMap: [
+            a: [b],
+            b: [],
+        ])
+
+        let specs = [
+            ObjectSpec(id: a, copyData: true),
+            ObjectSpec(id: b, copyPermissions: true, copyData: true),
+        ]
+        let result = try await resolver.resolve(objects: specs, introspector: introspector, cascade: true)
+
+        let specB = result.first { $0.id.name == "b" }!
+        // The explicitly provided spec should be preserved (copyData=true, copyPermissions=true)
+        #expect(specB.copyData == true)
+        #expect(specB.copyPermissions == true)
+    }
+
+    @Test("Non-cascade with empty input returns empty output")
+    func nonCascadeEmptyInput() async throws {
+        let result = try await resolver.resolve(
+            objects: [],
+            introspector: MockIntrospector(),
+            cascade: false
+        )
+        #expect(result.isEmpty)
+    }
+
+    @Test("Cascade with empty input returns empty output")
+    func cascadeEmptyInput() async throws {
+        let result = try await resolver.resolve(
+            objects: [],
+            introspector: MockIntrospector(),
+            cascade: true
+        )
+        #expect(result.isEmpty)
+    }
+
+    @Test("Non-cascade with single object returns that object")
+    func nonCascadeSingleObject() async throws {
+        let spec = ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: "t"))
+        let result = try await resolver.resolve(
+            objects: [spec],
+            introspector: MockIntrospector(),
+            cascade: false
+        )
+        #expect(result.count == 1)
+        #expect(result[0].id.name == "t")
+    }
+
+    @Test("Cascade three-node cycle throws dependency cycle error")
+    func threeNodeCycle() async throws {
+        // A -> B -> C -> A
+        let a = ObjectIdentifier(type: .table, schema: "public", name: "a")
+        let b = ObjectIdentifier(type: .table, schema: "public", name: "b")
+        let c = ObjectIdentifier(type: .table, schema: "public", name: "c")
+
+        let introspector = ConfigurableMockIntrospector(dependencyMap: [
+            a: [b],
+            b: [c],
+            c: [a],
+        ])
+
+        let specs = [ObjectSpec(id: a)]
+        await #expect(throws: PGSchemaEvoError.self) {
+            try await resolver.resolve(objects: specs, introspector: introspector, cascade: true)
+        }
+    }
+
+    @Test("Cascade deep chain resolves correctly")
+    func cascadeDeepChain() async throws {
+        // A -> B -> C -> D -> E
+        let a = ObjectIdentifier(type: .table, schema: "public", name: "a")
+        let b = ObjectIdentifier(type: .table, schema: "public", name: "b")
+        let c = ObjectIdentifier(type: .table, schema: "public", name: "c")
+        let d = ObjectIdentifier(type: .table, schema: "public", name: "d")
+        let e = ObjectIdentifier(type: .table, schema: "public", name: "e")
+
+        let introspector = ConfigurableMockIntrospector(dependencyMap: [
+            a: [b],
+            b: [c],
+            c: [d],
+            d: [e],
+            e: [],
+        ])
+
+        let specs = [ObjectSpec(id: a)]
+        let result = try await resolver.resolve(objects: specs, introspector: introspector, cascade: true)
+
+        let names = result.map(\.id.name)
+        #expect(names == ["e", "d", "c", "b", "a"])
+    }
+
+    @Test("Non-cascade with duplicate type objects preserves all")
+    func nonCascadeDuplicateTypes() async throws {
+        let specs = [
+            ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: "b")),
+            ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: "a")),
+        ]
+
+        let result = try await resolver.resolve(
+            objects: specs,
+            introspector: MockIntrospector(),
+            cascade: false
+        )
+
+        #expect(result.count == 2)
+        // Both are tables so order within same type depends on stable sort
+    }
 }
 
 // MARK: - Mock Introspectors

@@ -75,4 +75,30 @@ struct FunctionSQLGeneratorTests {
         let sql = gen.generateDrop(for: id)
         #expect(sql.contains("()"))
     }
+
+    @Test("Definition without trailing semicolon gets one appended")
+    func definitionWithoutSemicolon() throws {
+        let id = ObjectIdentifier(type: .function, schema: "public", name: "my_func")
+        let metadata = FunctionMetadata(
+            id: id,
+            definition: "CREATE FUNCTION public.my_func() RETURNS void LANGUAGE sql AS ''"
+        )
+        let sql = try gen.generateCreate(from: metadata)
+        #expect(sql.hasSuffix(";"))
+        #expect(!sql.hasSuffix(";;"))
+    }
+
+    @Test("DROP PROCEDURE format with signature")
+    func dropProcedureFormat() {
+        let id = ObjectIdentifier(type: .procedure, schema: "myschema", name: "cleanup", signature: "(integer)")
+        let sql = gen.generateDrop(for: id)
+        #expect(sql == "DROP PROCEDURE IF EXISTS \"myschema\".\"cleanup\"(integer) CASCADE;")
+    }
+
+    @Test("DROP FUNCTION format with signature")
+    func dropFunctionFormat() {
+        let id = ObjectIdentifier(type: .function, schema: "public", name: "add", signature: "(integer, integer)")
+        let sql = gen.generateDrop(for: id)
+        #expect(sql == "DROP FUNCTION IF EXISTS \"public\".\"add\"(integer, integer) CASCADE;")
+    }
 }

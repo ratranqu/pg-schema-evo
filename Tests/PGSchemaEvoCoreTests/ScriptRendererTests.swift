@@ -270,4 +270,168 @@ struct ScriptRendererTests {
         let script = renderer.render(job: job, steps: steps)
         #expect(script.contains("unknown size"))
     }
+
+    // MARK: - sqlObjectType coverage for all object types
+
+    @Test("DROP renders AGGREGATE for aggregate type")
+    func dropAggregate() {
+        let job = makeJob()
+        let id = ObjectIdentifier(type: .aggregate, schema: "public", name: "array_agg_custom")
+        let steps: [CloneStep] = [.dropObject(id)]
+        let script = renderer.render(job: job, steps: steps)
+        #expect(script.contains("DROP AGGREGATE IF EXISTS"))
+    }
+
+    @Test("DROP renders OPERATOR for operator type")
+    func dropOperator() {
+        let job = makeJob()
+        let id = ObjectIdentifier(type: .operator, schema: "public", name: "===")
+        let steps: [CloneStep] = [.dropObject(id)]
+        let script = renderer.render(job: job, steps: steps)
+        #expect(script.contains("DROP OPERATOR IF EXISTS"))
+    }
+
+    @Test("DROP renders FOREIGN DATA WRAPPER for fdw type")
+    func dropForeignDataWrapper() {
+        let job = makeJob()
+        let id = ObjectIdentifier(type: .foreignDataWrapper, name: "postgres_fdw")
+        let steps: [CloneStep] = [.dropObject(id)]
+        let script = renderer.render(job: job, steps: steps)
+        #expect(script.contains("DROP FOREIGN DATA WRAPPER IF EXISTS"))
+    }
+
+    @Test("DROP renders ROLE for role type")
+    func dropRole() {
+        let job = makeJob()
+        let id = ObjectIdentifier(type: .role, name: "readonly")
+        let steps: [CloneStep] = [.dropObject(id)]
+        let script = renderer.render(job: job, steps: steps)
+        #expect(script.contains("DROP ROLE IF EXISTS"))
+    }
+
+    @Test("DROP renders SCHEMA for schema type")
+    func dropSchema() {
+        let job = makeJob()
+        let id = ObjectIdentifier(type: .schema, name: "analytics")
+        let steps: [CloneStep] = [.dropObject(id)]
+        let script = renderer.render(job: job, steps: steps)
+        #expect(script.contains("DROP SCHEMA IF EXISTS"))
+    }
+
+    @Test("DROP renders EXTENSION for extension type")
+    func dropExtension() {
+        let job = makeJob()
+        let id = ObjectIdentifier(type: .extension, name: "uuid-ossp")
+        let steps: [CloneStep] = [.dropObject(id)]
+        let script = renderer.render(job: job, steps: steps)
+        #expect(script.contains("DROP EXTENSION IF EXISTS"))
+    }
+
+    // MARK: - copyViaPsql edge cases
+
+    @Test("copyViaPsql with WHERE clause only (no LIMIT)")
+    func copyDataWithWhereOnly() {
+        let job = makeJob()
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "orders")
+        let steps: [CloneStep] = [
+            .copyData(id: id, method: .copy, estimatedSize: 1000, whereClause: "status = 'active'"),
+        ]
+        let script = renderer.render(job: job, steps: steps)
+        #expect(script.contains("SELECT * FROM"))
+        #expect(script.contains("WHERE status = 'active'"))
+        #expect(!script.contains("LIMIT"))
+    }
+
+    @Test("copyViaPsql with LIMIT only (no WHERE clause)")
+    func copyDataWithLimitOnly() {
+        let job = makeJob()
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "orders")
+        let steps: [CloneStep] = [
+            .copyData(id: id, method: .copy, estimatedSize: 1000, rowLimit: 100),
+        ]
+        let script = renderer.render(job: job, steps: steps)
+        #expect(script.contains("SELECT * FROM"))
+        #expect(script.contains("LIMIT 100"))
+        #expect(!script.contains("WHERE"))
+    }
+
+    @Test("copyViaPsql without WHERE or LIMIT uses simple COPY")
+    func copyDataSimpleCopy() {
+        let job = makeJob()
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "users")
+        let steps: [CloneStep] = [
+            .copyData(id: id, method: .copy, estimatedSize: 1000),
+        ]
+        let script = renderer.render(job: job, steps: steps)
+        // Simple copy should NOT use SELECT * FROM subquery
+        #expect(!script.contains("SELECT * FROM"))
+        #expect(script.contains("\\copy"))
+        #expect(script.contains("\"public\".\"users\""))
+    }
+
+    @Test("copyViaPsql with auto method renders like copy method")
+    func copyDataAutoMethod() {
+        let job = makeJob()
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "data")
+        let steps: [CloneStep] = [
+            .copyData(id: id, method: .auto, estimatedSize: 500),
+        ]
+        let script = renderer.render(job: job, steps: steps)
+        #expect(script.contains("\\copy"))
+        #expect(!script.contains("pg_dump"))
+    }
+
+    // MARK: - copyViaPgDump rendering details
+
+    @Test("copyViaPgDump includes table name and correct flags")
+    func copyViaPgDumpDetails() {
+        let job = makeJob()
+        let id = ObjectIdentifier(type: .table, schema: "warehouse", name: "inventory")
+        let steps: [CloneStep] = [
+            .copyData(id: id, method: .pgDump, estimatedSize: 2_000_000_000),
+        ]
+        let script = renderer.render(job: job, steps: steps)
+        #expect(script.contains("--format=custom"))
+        #expect(script.contains("--data-only"))
+        #expect(script.contains("--table=\"warehouse\".\"inventory\""))
+        #expect(script.contains("$SOURCE_DSN"))
+        #expect(script.contains("pg_restore"))
+        #expect(script.contains("--no-owner"))
+        #expect(script.contains("--dbname=\"$TARGET_DSN\""))
+    }
+
+    // MARK: - Multiple steps numbering
+
+    @Test("Multiple steps are numbered sequentially in section headers")
+    func multipleStepsNumbering() {
+        let job = makeJob()
+        let id1 = ObjectIdentifier(type: .table, schema: "public", name: "a")
+        let id2 = ObjectIdentifier(type: .table, schema: "public", name: "b")
+        let steps: [CloneStep] = [
+            .dropObject(id1),
+            .createObject(sql: "CREATE TABLE a();", id: id1),
+            .dropObject(id2),
+            .createObject(sql: "CREATE TABLE b();", id: id2),
+        ]
+        let script = renderer.render(job: job, steps: steps)
+        #expect(script.contains("# 1."))
+        #expect(script.contains("# 2."))
+        #expect(script.contains("# 3."))
+        #expect(script.contains("# 4."))
+    }
+
+    // MARK: - Section header format
+
+    @Test("copyData section header includes method and WHERE/LIMIT info")
+    func copyDataSectionHeaderDetails() {
+        let job = makeJob()
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "events")
+        let steps: [CloneStep] = [
+            .copyData(id: id, method: .pgDump, estimatedSize: 1_000_000, whereClause: "year > 2020", rowLimit: 1000),
+        ]
+        let script = renderer.render(job: job, steps: steps)
+        #expect(script.contains("method: pgdump"))
+        #expect(script.contains("WHERE year > 2020"))
+        #expect(script.contains("LIMIT 1000"))
+    }
 }

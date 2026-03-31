@@ -58,4 +58,37 @@ struct SequenceSQLGeneratorTests {
         #expect(sql.contains("DROP SEQUENCE IF EXISTS"))
         #expect(sql.contains("CASCADE"))
     }
+
+    @Test("Wrong metadata type throws error")
+    func wrongMetadataThrows() {
+        let id = ObjectIdentifier(type: .sequence, schema: "public", name: "s")
+        let metadata = EnumMetadata(id: id, labels: [])
+        #expect(throws: PGSchemaEvoError.self) {
+            try gen.generateCreate(from: metadata)
+        }
+    }
+
+    @Test("Sequence without OWNED BY omits ALTER SEQUENCE")
+    func sequenceWithoutOwnedBy() throws {
+        let id = ObjectIdentifier(type: .sequence, schema: "public", name: "standalone_seq")
+        let metadata = SequenceMetadata(id: id)
+        let sql = try gen.generateCreate(from: metadata)
+        #expect(!sql.contains("ALTER SEQUENCE"))
+        #expect(!sql.contains("OWNED BY"))
+    }
+
+    @Test("Sequence includes AS dataType clause")
+    func sequenceDataType() throws {
+        let id = ObjectIdentifier(type: .sequence, schema: "public", name: "small_seq")
+        let metadata = SequenceMetadata(id: id, dataType: "smallint", startValue: 1, increment: 1, minValue: 1, maxValue: 32767)
+        let sql = try gen.generateCreate(from: metadata)
+        #expect(sql.contains("AS smallint"))
+    }
+
+    @Test("DROP SEQUENCE format")
+    func dropSequenceFormat() {
+        let id = ObjectIdentifier(type: .sequence, schema: "myschema", name: "my_seq")
+        let sql = gen.generateDrop(for: id)
+        #expect(sql == "DROP SEQUENCE IF EXISTS \"myschema\".\"my_seq\" CASCADE;")
+    }
 }
