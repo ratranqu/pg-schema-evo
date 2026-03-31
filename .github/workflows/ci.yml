@@ -57,7 +57,11 @@ jobs:
           if [ -z "$TEST_BIN" ]; then
             TEST_BIN=$(find "$BIN" -name 'pg-schema-evoPackageTests' -print -quit)
           fi
-          llvm-cov export -format=lcov \
+          LLVM_COV=$(dirname "$(which swiftc)")/../lib/llvm/bin/llvm-cov
+          if [ ! -f "$LLVM_COV" ]; then
+            LLVM_COV=$(which llvm-cov 2>/dev/null || find "$(dirname "$(which swiftc)")/.." -name llvm-cov -type f -print -quit)
+          fi
+          "$LLVM_COV" export -format=lcov \
             -instr-profile="$PROFDATA" \
             "$TEST_BIN" \
             -ignore-filename-regex='Tests/|\.build/' \
@@ -135,7 +139,11 @@ jobs:
           if [ -z "$TEST_BIN" ]; then
             TEST_BIN=$(find "$BIN" -name 'pg-schema-evoPackageTests' -print -quit)
           fi
-          llvm-cov export -format=lcov \
+          LLVM_COV=$(dirname "$(which swiftc)")/../lib/llvm/bin/llvm-cov
+          if [ ! -f "$LLVM_COV" ]; then
+            LLVM_COV=$(which llvm-cov 2>/dev/null || find "$(dirname "$(which swiftc)")/.." -name llvm-cov -type f -print -quit)
+          fi
+          "$LLVM_COV" export -format=lcov \
             -instr-profile="$PROFDATA" \
             "$TEST_BIN" \
             -ignore-filename-regex='Tests/|\.build/' \
