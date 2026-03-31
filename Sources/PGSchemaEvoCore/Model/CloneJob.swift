@@ -16,6 +16,8 @@ public struct CloneJob: Sendable {
     public let skipPreflight: Bool
     /// Global row limit for data copy (per-object overrides take precedence).
     public let globalRowLimit: Int?
+    /// Maximum parallel data transfers. 0 = auto-detect, 1 = sequential.
+    public let parallel: Int
 
     /// Default threshold: 100 MB.
     public static let defaultDataSizeThreshold = 100 * 1024 * 1024
@@ -31,7 +33,8 @@ public struct CloneJob: Sendable {
         force: Bool = false,
         retries: Int = 3,
         skipPreflight: Bool = false,
-        globalRowLimit: Int? = nil
+        globalRowLimit: Int? = nil,
+        parallel: Int = 0
     ) {
         self.source = source
         self.target = target
@@ -44,5 +47,6 @@ public struct CloneJob: Sendable {
         self.retries = retries
         self.skipPreflight = skipPreflight
         self.globalRowLimit = globalRowLimit
+        self.parallel = parallel
     }
 }

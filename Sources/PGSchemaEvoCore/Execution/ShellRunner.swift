@@ -69,6 +69,91 @@ public struct ShellRunner: Sendable {
         }
     }
 
+    /// Pipe one process's stdout directly into another's stdin (streaming, no intermediate buffer).
+    ///
+    /// Used for streaming COPY: source psql COPY TO STDOUT → target psql COPY FROM STDIN.
+    public func runPipe(
+        sourceCommand: String,
+        sourceArguments: [String] = [],
+        sourceEnvironment: [String: String] = [:],
+        targetCommand: String,
+        targetArguments: [String] = [],
+        targetEnvironment: [String: String] = [:]
+    ) async throws -> ShellResult {
+        try await withCheckedThrowingContinuation { continuation in
+            let sourceProcess = Process()
+            sourceProcess.executableURL = URL(fileURLWithPath: sourceCommand)
+            sourceProcess.arguments = sourceArguments
+            var srcEnv = ProcessInfo.processInfo.environment
+            for (key, value) in sourceEnvironment { srcEnv[key] = value }
+            sourceProcess.environment = srcEnv
+
+            let targetProcess = Process()
+            targetProcess.executableURL = URL(fileURLWithPath: targetCommand)
+            targetProcess.arguments = targetArguments
+            var tgtEnv = ProcessInfo.processInfo.environment
+            for (key, value) in targetEnvironment { tgtEnv[key] = value }
+            targetProcess.environment = tgtEnv
+
+            // Connect source stdout → target stdin via pipe
+            let pipe = Pipe()
+            sourceProcess.standardOutput = pipe
+            targetProcess.standardInput = pipe
+
+            // Capture stderr from both processes
+            let sourceStderr = Pipe()
+            let targetStderr = Pipe()
+            sourceProcess.standardError = sourceStderr
+            targetProcess.standardError = targetStderr
+
+            // Capture target stdout (usually empty for COPY FROM STDIN)
+            let targetStdout = Pipe()
+            targetProcess.standardOutput = targetStdout
+
+            do {
+                try sourceProcess.run()
+                SignalHandler.shared.registerProcess(sourceProcess)
+                try targetProcess.run()
+
+                sourceProcess.waitUntilExit()
+                // Close the write end so target sees EOF
+                pipe.fileHandleForWriting.closeFile()
+                targetProcess.waitUntilExit()
+                SignalHandler.shared.unregisterProcess()
+
+                let srcStderrData = sourceStderr.fileHandleForReading.readDataToEndOfFile()
+                let tgtStderrData = targetStderr.fileHandleForReading.readDataToEndOfFile()
+                let tgtStdoutData = targetStdout.fileHandleForReading.readDataToEndOfFile()
+
+                let srcErr = String(data: srcStderrData, encoding: .utf8) ?? ""
+                let tgtErr = String(data: tgtStderrData, encoding: .utf8) ?? ""
+
+                // If source failed, report that
+                if sourceProcess.terminationStatus != 0 {
+                    continuation.resume(returning: ShellResult(
+                        exitCode: sourceProcess.terminationStatus,
+                        stdout: "",
+                        stderr: "Source: \(srcErr)"
+                    ))
+                    return
+                }
+
+                // Otherwise report target status
+                continuation.resume(returning: ShellResult(
+                    exitCode: targetProcess.terminationStatus,
+                    stdout: String(data: tgtStdoutData, encoding: .utf8) ?? "",
+                    stderr: tgtErr
+                ))
+            } catch {
+                continuation.resume(throwing: PGSchemaEvoError.shellCommandFailed(
+                    command: "pipe(\(sourceCommand) | \(targetCommand))",
+                    exitCode: -1,
+                    stderr: error.localizedDescription
+                ))
+            }
+        }
+    }
+
     /// Find the full path to a command using `which`.
     public func which(_ command: String) -> String? {
         let process = Process()

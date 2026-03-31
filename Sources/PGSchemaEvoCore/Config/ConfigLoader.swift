@@ -118,6 +118,8 @@ public struct ConfigLoader: Sendable {
             specs.append(spec)
         }
 
+        let parallel = overrides.parallel ?? (yaml["parallel"] as? Int) ?? 0
+
         return CloneJobConfig(
             source: source,
             target: target,
@@ -126,7 +128,8 @@ public struct ConfigLoader: Sendable {
             defaultDataMethod: defaultDataMethod,
             dataSizeThresholdMB: defaultDataThresholdMB,
             dropIfExists: defaultDropExisting,
-            force: overrides.force ?? false
+            force: overrides.force ?? false,
+            parallel: parallel
         )
     }
 
@@ -230,6 +233,7 @@ public struct ConfigOverrides: Sendable {
     public var dataThresholdMB: Int?
     public var dropExisting: Bool?
     public var force: Bool?
+    public var parallel: Int?
 
     public init(
         dryRun: Bool? = nil,
@@ -239,7 +243,8 @@ public struct ConfigOverrides: Sendable {
         dataMethod: TransferMethod? = nil,
         dataThresholdMB: Int? = nil,
         dropExisting: Bool? = nil,
-        force: Bool? = nil
+        force: Bool? = nil,
+        parallel: Int? = nil
     ) {
         self.dryRun = dryRun
         self.data = data
@@ -249,6 +254,7 @@ public struct ConfigOverrides: Sendable {
         self.dataThresholdMB = dataThresholdMB
         self.dropExisting = dropExisting
         self.force = force
+        self.parallel = parallel
     }
 }
 
@@ -262,6 +268,7 @@ public struct CloneJobConfig: Sendable {
     public let dataSizeThresholdMB: Int
     public let dropIfExists: Bool
     public let force: Bool
+    public let parallel: Int
 
     public func toCloneJob() -> CloneJob {
         CloneJob(
@@ -271,7 +278,8 @@ public struct CloneJobConfig: Sendable {
             dryRun: dryRun,
             defaultDataMethod: defaultDataMethod,
             dataSizeThreshold: dataSizeThresholdMB * 1024 * 1024,
-            dropIfExists: dropIfExists
+            dropIfExists: dropIfExists,
+            parallel: parallel
         )
     }
 }

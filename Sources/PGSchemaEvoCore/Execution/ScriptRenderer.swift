@@ -5,6 +5,38 @@ public struct ScriptRenderer: Sendable {
 
     public init() {}
 
+    /// Render a complete bash script for clone steps and data transfers.
+    public func render(
+        job: CloneJob,
+        steps: [CloneStep],
+        dataTransfers: [DataTransferTask]
+    ) -> String {
+        var script = render(job: job, steps: steps)
+
+        if !dataTransfers.isEmpty {
+            let parallel = job.parallel == 0
+                ? ParallelDataTransfer.autoDetectConcurrency()
+                : job.parallel
+            script += "\n"
+            script += "#=======================================\n"
+            script += "# Data Transfers (parallel: \(parallel))\n"
+            script += "#=======================================\n\n"
+
+            for (index, task) in dataTransfers.enumerated() {
+                let sizeStr = task.estimatedSize.map { formatBytes($0) } ?? "unknown size"
+                script += sectionHeader(steps.count + index + 1, "Copy data: \(task.id) (estimated \(sizeStr), method: \(task.method.rawValue))")
+                switch task.method {
+                case .copy, .auto:
+                    script += copyViaPsql(task.id, whereClause: task.whereClause, rowLimit: task.rowLimit)
+                case .pgDump:
+                    script += copyViaPgDump(task.id)
+                }
+            }
+        }
+
+        return script
+    }
+
     /// Render a complete bash script for the given clone steps.
     public func render(
         job: CloneJob,

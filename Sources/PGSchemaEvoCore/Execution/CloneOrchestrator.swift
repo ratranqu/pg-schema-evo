@@ -24,12 +24,22 @@ public struct CloneOrchestrator: Sendable {
 
         logger.info("Starting clone operation with \(job.objects.count) object(s)")
 
-        let connection = try await PostgresConnectionHelper.connect(
+        // Resolve effective parallelism
+        // parallel > 1: use parallel streaming data transfer (outside transaction)
+        // parallel <= 1 (0=auto, 1=sequential): use inline data in transaction (proven path)
+        let useParallelData = job.parallel > 1
+        let effectiveParallel = useParallelData ? job.parallel : 1
+        logger.info("Parallelism: \(effectiveParallel) (configured: \(job.parallel == 0 ? "auto" : String(job.parallel)), parallel data: \(useParallelData))")
+
+        // Use connection pool for parallel introspection
+        let poolSize = min(effectiveParallel, 4) // Cap pool for introspection
+        let pool = try await PostgresConnectionPool.create(
             config: job.source,
+            size: poolSize,
             logger: logger
         )
 
-        let introspector = PGCatalogIntrospector(connection: connection, logger: logger)
+        let introspector = PooledIntrospector(pool: pool, logger: logger)
         let pgDumpIntrospector = PgDumpIntrospector(sourceConfig: job.source, logger: logger)
         let depResolver = DependencyResolver()
 
@@ -43,7 +53,8 @@ public struct CloneOrchestrator: Sendable {
         let compositeTypeSQLGen = CompositeTypeSQLGenerator()
         let permissionSQLGen = PermissionSQLGenerator()
 
-        var steps: [CloneStep] = []
+        var ddlSteps: [CloneStep] = []
+        var dataTransfers: [DataTransferTask] = []
 
         do {
             // Resolve dependencies and determine clone order
@@ -54,6 +65,9 @@ public struct CloneOrchestrator: Sendable {
                 cascade: anyCascade
             )
 
+            // Build dependency map for data transfer scheduling
+            let depGraph = buildDataDependencies(specs: orderedSpecs, depResolver: depResolver)
+
             logger.info("Clone order: \(orderedSpecs.map(\.id.description).joined(separator: ", "))")
 
             for spec in orderedSpecs {
@@ -61,7 +75,7 @@ public struct CloneOrchestrator: Sendable {
 
                 // Drop if exists
                 if job.dropIfExists {
-                    steps.append(.dropObject(spec.id))
+                    ddlSteps.append(.dropObject(spec.id))
                 }
 
                 // Introspect and generate DDL per object type
@@ -80,22 +94,22 @@ public struct CloneOrchestrator: Sendable {
                             options: [],
                             range: createSQL.range(of: ");", options: .backwards, range: nil, locale: nil) ?? createSQL.startIndex..<createSQL.endIndex
                         )
-                        steps.append(.createObject(sql: partitionedSQL, id: spec.id))
+                        ddlSteps.append(.createObject(sql: partitionedSQL, id: spec.id))
 
                         // Create and attach each child partition
                         let children = try await introspector.listPartitions(for: spec.id)
                         for child in children {
                             if job.dropIfExists {
-                                steps.append(.dropObject(child.id))
+                                ddlSteps.append(.dropObject(child.id))
                             }
                             let childMeta = try await introspector.describeTable(child.id)
                             let childSQL = try tableSQLGen.generateCreate(from: childMeta)
-                            steps.append(.createObject(sql: childSQL, id: child.id))
+                            ddlSteps.append(.createObject(sql: childSQL, id: child.id))
 
                             let attachSQL = "ALTER TABLE \(spec.id.qualifiedName) ATTACH PARTITION \(child.id.qualifiedName) \(child.boundSpec);"
-                            steps.append(.attachPartition(sql: attachSQL, id: child.id))
+                            ddlSteps.append(.attachPartition(sql: attachSQL, id: child.id))
 
-                            // Copy data for each partition if requested
+                            // Queue data transfer for each partition
                             if spec.copyData {
                                 let size = try await introspector.relationSize(child.id)
                                 let method = resolveTransferMethod(
@@ -104,18 +118,29 @@ public struct CloneOrchestrator: Sendable {
                                     threshold: job.dataSizeThreshold
                                 )
                                 let rowLimit = spec.rowLimit ?? job.globalRowLimit
-                                steps.append(.copyData(
-                                    id: child.id,
-                                    method: method,
-                                    estimatedSize: size,
-                                    whereClause: spec.whereClause,
-                                    rowLimit: rowLimit
-                                ))
+                                if useParallelData {
+                                    dataTransfers.append(DataTransferTask(
+                                        id: child.id,
+                                        method: method,
+                                        estimatedSize: size,
+                                        whereClause: spec.whereClause,
+                                        rowLimit: rowLimit,
+                                        dependsOn: [] // Partitions of same table are independent
+                                    ))
+                                } else {
+                                    ddlSteps.append(.copyData(
+                                        id: child.id,
+                                        method: method,
+                                        estimatedSize: size,
+                                        whereClause: spec.whereClause,
+                                        rowLimit: rowLimit
+                                    ))
+                                }
                             }
                         }
                     } else {
                         let createSQL = try tableSQLGen.generateCreate(from: metadata)
-                        steps.append(.createObject(sql: createSQL, id: spec.id))
+                        ddlSteps.append(.createObject(sql: createSQL, id: spec.id))
 
                         if spec.copyData {
                             let size = try await introspector.relationSize(spec.id)
@@ -125,13 +150,24 @@ public struct CloneOrchestrator: Sendable {
                                 threshold: job.dataSizeThreshold
                             )
                             let rowLimit = spec.rowLimit ?? job.globalRowLimit
-                            steps.append(.copyData(
-                                id: spec.id,
-                                method: method,
-                                estimatedSize: size,
-                                whereClause: spec.whereClause,
-                                rowLimit: rowLimit
-                            ))
+                            if useParallelData {
+                                dataTransfers.append(DataTransferTask(
+                                    id: spec.id,
+                                    method: method,
+                                    estimatedSize: size,
+                                    whereClause: spec.whereClause,
+                                    rowLimit: rowLimit,
+                                    dependsOn: depGraph[spec.id] ?? []
+                                ))
+                            } else {
+                                ddlSteps.append(.copyData(
+                                    id: spec.id,
+                                    method: method,
+                                    estimatedSize: size,
+                                    whereClause: spec.whereClause,
+                                    rowLimit: rowLimit
+                                ))
+                            }
                         }
                     }
 
@@ -150,7 +186,7 @@ public struct CloneOrchestrator: Sendable {
                                 rlsSQL += policy.definition + "\n"
                             }
                             if !rlsSQL.isEmpty {
-                                steps.append(.enableRLS(sql: rlsSQL, id: spec.id))
+                                ddlSteps.append(.enableRLS(sql: rlsSQL, id: spec.id))
                             }
                         }
                     }
@@ -158,56 +194,56 @@ public struct CloneOrchestrator: Sendable {
                 case .view:
                     let metadata = try await introspector.describeView(spec.id)
                     let createSQL = try viewSQLGen.generateCreate(from: metadata)
-                    steps.append(.createObject(sql: createSQL, id: spec.id))
+                    ddlSteps.append(.createObject(sql: createSQL, id: spec.id))
 
                 case .materializedView:
                     let metadata = try await introspector.describeMaterializedView(spec.id)
                     let createSQL = try viewSQLGen.generateCreate(from: metadata)
-                    steps.append(.createObject(sql: createSQL, id: spec.id))
+                    ddlSteps.append(.createObject(sql: createSQL, id: spec.id))
 
                     if spec.copyData {
-                        steps.append(.refreshMaterializedView(spec.id))
+                        ddlSteps.append(.refreshMaterializedView(spec.id))
                     }
 
                 case .sequence:
                     let metadata = try await introspector.describeSequence(spec.id)
                     let createSQL = try seqSQLGen.generateCreate(from: metadata)
-                    steps.append(.createObject(sql: createSQL, id: spec.id))
+                    ddlSteps.append(.createObject(sql: createSQL, id: spec.id))
 
                 case .enum:
                     let metadata = try await introspector.describeEnum(spec.id)
                     let createSQL = try enumSQLGen.generateCreate(from: metadata)
-                    steps.append(.createObject(sql: createSQL, id: spec.id))
+                    ddlSteps.append(.createObject(sql: createSQL, id: spec.id))
 
                 case .compositeType:
                     let metadata = try await introspector.describeCompositeType(spec.id)
                     let createSQL = try compositeTypeSQLGen.generateCreate(from: metadata)
-                    steps.append(.createObject(sql: createSQL, id: spec.id))
+                    ddlSteps.append(.createObject(sql: createSQL, id: spec.id))
 
                 case .function, .procedure:
                     let metadata = try await introspector.describeFunction(spec.id)
                     let createSQL = try funcSQLGen.generateCreate(from: metadata)
-                    steps.append(.createObject(sql: createSQL, id: spec.id))
+                    ddlSteps.append(.createObject(sql: createSQL, id: spec.id))
 
                 case .schema:
                     let metadata = try await introspector.describeSchema(spec.id)
                     let createSQL = try schemaSQLGen.generateCreate(from: metadata)
-                    steps.append(.createObject(sql: createSQL, id: spec.id))
+                    ddlSteps.append(.createObject(sql: createSQL, id: spec.id))
 
                 case .role:
                     let metadata = try await introspector.describeRole(spec.id)
                     let createSQL = try schemaSQLGen.generateCreate(from: metadata)
-                    steps.append(.createObject(sql: createSQL, id: spec.id))
+                    ddlSteps.append(.createObject(sql: createSQL, id: spec.id))
 
                 case .extension:
                     let metadata = try await introspector.describeExtension(spec.id)
                     let createSQL = try schemaSQLGen.generateCreate(from: metadata)
-                    steps.append(.createObject(sql: createSQL, id: spec.id))
+                    ddlSteps.append(.createObject(sql: createSQL, id: spec.id))
 
                 case .aggregate, .operator, .foreignDataWrapper, .foreignTable:
                     // Hybrid approach: use pg_dump for DDL extraction
                     let metadata = try await pgDumpIntrospector.extractDDL(for: spec.id)
-                    steps.append(.createObject(sql: metadata.ddl, id: spec.id))
+                    ddlSteps.append(.createObject(sql: metadata.ddl, id: spec.id))
 
                     // Foreign tables support data copy
                     if spec.copyData && spec.id.type == .foreignTable {
@@ -217,7 +253,20 @@ public struct CloneOrchestrator: Sendable {
                             size: size,
                             threshold: job.dataSizeThreshold
                         )
-                        steps.append(.copyData(id: spec.id, method: method, estimatedSize: size))
+                        if useParallelData {
+                            dataTransfers.append(DataTransferTask(
+                                id: spec.id,
+                                method: method,
+                                estimatedSize: size,
+                                dependsOn: depGraph[spec.id] ?? []
+                            ))
+                        } else {
+                            ddlSteps.append(.copyData(
+                                id: spec.id,
+                                method: method,
+                                estimatedSize: size
+                            ))
+                        }
                     }
                 }
 
@@ -226,26 +275,26 @@ public struct CloneOrchestrator: Sendable {
                     let grants = try await introspector.permissions(for: spec.id)
                     if !grants.isEmpty {
                         let grantSQL = permissionSQLGen.generateGrants(for: spec.id, grants: grants)
-                        steps.append(.grantPermissions(sql: grantSQL, id: spec.id))
+                        ddlSteps.append(.grantPermissions(sql: grantSQL, id: spec.id))
                     }
                 }
             }
         } catch {
-            try? await connection.close()
+            await pool.close()
             throw error
         }
 
-        try? await connection.close()
+        await pool.close()
 
         if job.dryRun {
-            let progress = ProgressReporter(totalSteps: steps.count)
+            let progress = ProgressReporter(totalSteps: ddlSteps.count + dataTransfers.count)
             progress.reportDryRun()
             let renderer = ScriptRenderer()
-            return renderer.render(job: job, steps: steps)
+            return renderer.render(job: job, steps: ddlSteps, dataTransfers: dataTransfers)
         } else {
             // Confirmation prompt unless --force
             if !job.force {
-                let progress = ProgressReporter(totalSteps: steps.count)
+                let progress = ProgressReporter(totalSteps: ddlSteps.count + dataTransfers.count)
                 let response = progress.reportConfirmation(
                     targetDSN: job.target.toDSN(maskPassword: true)
                 )
@@ -258,11 +307,47 @@ public struct CloneOrchestrator: Sendable {
             SignalHandler.shared.install()
             defer { SignalHandler.shared.uninstall() }
 
-            // Execute with retry
+            // Phase 1: Execute DDL in transaction (sequential)
             let executor = LiveExecutor(logger: logger)
-            try await executeWithRetry(executor: executor, steps: steps, job: job)
+            try await executeWithRetry(executor: executor, steps: ddlSteps, job: job)
+
+            // Phase 2: Parallel streaming data transfer
+            if !dataTransfers.isEmpty {
+                logger.info("Starting parallel data transfer (\(dataTransfers.count) table(s), concurrency: \(effectiveParallel))")
+                let transfer = ParallelDataTransfer(
+                    maxConcurrency: effectiveParallel,
+                    shell: ShellRunner(),
+                    logger: logger
+                )
+                try await transfer.execute(
+                    transfers: dataTransfers,
+                    sourceDSN: job.source.toDSN(),
+                    targetDSN: job.target.toDSN(),
+                    sourceEnv: job.source.environment(),
+                    targetEnv: job.target.environment()
+                )
+            }
             return ""
         }
+    }
+
+    /// Build data dependency map: for each table, which other tables it depends on via FK.
+    private func buildDataDependencies(
+        specs: [ObjectSpec],
+        depResolver: DependencyResolver
+    ) -> [ObjectIdentifier: Set<ObjectIdentifier>] {
+        // The topological order already encodes deps. We just need table-level FK deps
+        // for data transfer scheduling. Tables only depend on FK-referenced tables for data.
+        // For now, use the ordering position as a simple heuristic.
+        var depMap: [ObjectIdentifier: Set<ObjectIdentifier>] = [:]
+        let tableIds = specs.filter { $0.id.type == .table }.map(\.id)
+        // Tables earlier in topological order are dependencies of later tables
+        var seen: Set<ObjectIdentifier> = []
+        for id in tableIds {
+            depMap[id] = seen
+            seen.insert(id)
+        }
+        return depMap
     }
 
     /// Execute with transaction wrapping and retry on transient failures.
@@ -271,6 +356,8 @@ public struct CloneOrchestrator: Sendable {
         steps: [CloneStep],
         job: CloneJob
     ) async throws {
+        guard !steps.isEmpty else { return }
+
         var lastError: Error?
 
         for attempt in 0...job.retries {
@@ -317,6 +404,176 @@ public struct CloneOrchestrator: Sendable {
         case .auto:
             guard let size else { return .copy }
             return size >= threshold ? .pgDump : .copy
+        }
+    }
+}
+
+/// Wraps a connection pool to implement the SchemaIntrospector protocol.
+///
+/// Each introspection call borrows a connection from the pool, enabling
+/// concurrent introspection when used with TaskGroup.
+final class PooledIntrospector: SchemaIntrospector, @unchecked Sendable {
+    private let pool: PostgresConnectionPool
+    private let logger: Logger
+
+    init(pool: PostgresConnectionPool, logger: Logger) {
+        self.pool = pool
+        self.logger = logger
+    }
+
+    func describeTable(_ id: ObjectIdentifier) async throws -> TableMetadata {
+        guard let schema = id.schema else {
+            throw PGSchemaEvoError.invalidObjectSpec("Table requires a schema: \(id)")
+        }
+
+        // Run all 4 introspection queries concurrently on separate connections
+        async let columns = pool.withConnection { conn in
+            let i = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await i.queryColumns(schema: schema, name: id.name)
+        }
+        async let constraints = pool.withConnection { conn in
+            let i = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await i.queryConstraints(schema: schema, name: id.name)
+        }
+        async let indexes = pool.withConnection { conn in
+            let i = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await i.queryIndexes(schema: schema, name: id.name)
+        }
+        async let triggers = pool.withConnection { conn in
+            let i = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await i.queryTriggers(schema: schema, name: id.name)
+        }
+
+        let cols = try await columns
+        if cols.isEmpty {
+            throw PGSchemaEvoError.objectNotFound(id)
+        }
+
+        return TableMetadata(
+            id: id,
+            columns: cols,
+            constraints: try await constraints,
+            indexes: try await indexes,
+            triggers: try await triggers
+        )
+    }
+
+    func describeView(_ id: ObjectIdentifier) async throws -> ViewMetadata {
+        try await pool.withConnection { conn in
+            let introspector = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await introspector.describeView(id)
+        }
+    }
+
+    func describeMaterializedView(_ id: ObjectIdentifier) async throws -> MaterializedViewMetadata {
+        try await pool.withConnection { conn in
+            let introspector = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await introspector.describeMaterializedView(id)
+        }
+    }
+
+    func describeSequence(_ id: ObjectIdentifier) async throws -> SequenceMetadata {
+        try await pool.withConnection { conn in
+            let introspector = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await introspector.describeSequence(id)
+        }
+    }
+
+    func describeEnum(_ id: ObjectIdentifier) async throws -> EnumMetadata {
+        try await pool.withConnection { conn in
+            let introspector = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await introspector.describeEnum(id)
+        }
+    }
+
+    func describeFunction(_ id: ObjectIdentifier) async throws -> FunctionMetadata {
+        try await pool.withConnection { conn in
+            let introspector = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await introspector.describeFunction(id)
+        }
+    }
+
+    func describeSchema(_ id: ObjectIdentifier) async throws -> SchemaMetadata {
+        try await pool.withConnection { conn in
+            let introspector = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await introspector.describeSchema(id)
+        }
+    }
+
+    func describeRole(_ id: ObjectIdentifier) async throws -> RoleMetadata {
+        try await pool.withConnection { conn in
+            let introspector = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await introspector.describeRole(id)
+        }
+    }
+
+    func describeCompositeType(_ id: ObjectIdentifier) async throws -> CompositeTypeMetadata {
+        try await pool.withConnection { conn in
+            let introspector = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await introspector.describeCompositeType(id)
+        }
+    }
+
+    func describeExtension(_ id: ObjectIdentifier) async throws -> ExtensionMetadata {
+        try await pool.withConnection { conn in
+            let introspector = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await introspector.describeExtension(id)
+        }
+    }
+
+    func relationSize(_ id: ObjectIdentifier) async throws -> Int? {
+        try await pool.withConnection { conn in
+            let introspector = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await introspector.relationSize(id)
+        }
+    }
+
+    func listObjects(schema: String?, types: [ObjectType]?) async throws -> [ObjectIdentifier] {
+        try await pool.withConnection { conn in
+            let introspector = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await introspector.listObjects(schema: schema, types: types)
+        }
+    }
+
+    func permissions(for id: ObjectIdentifier) async throws -> [PermissionGrant] {
+        try await pool.withConnection { conn in
+            let introspector = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await introspector.permissions(for: id)
+        }
+    }
+
+    func dependencies(for id: ObjectIdentifier) async throws -> [ObjectIdentifier] {
+        try await pool.withConnection { conn in
+            let introspector = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await introspector.dependencies(for: id)
+        }
+    }
+
+    func rlsPolicies(for id: ObjectIdentifier) async throws -> RLSInfo {
+        try await pool.withConnection { conn in
+            let introspector = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await introspector.rlsPolicies(for: id)
+        }
+    }
+
+    func partitionInfo(for id: ObjectIdentifier) async throws -> PartitionInfo? {
+        try await pool.withConnection { conn in
+            let introspector = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await introspector.partitionInfo(for: id)
+        }
+    }
+
+    func listPartitions(for id: ObjectIdentifier) async throws -> [PartitionChild] {
+        try await pool.withConnection { conn in
+            let introspector = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await introspector.listPartitions(for: id)
+        }
+    }
+
+    func primaryKeyColumns(for id: ObjectIdentifier) async throws -> [String] {
+        try await pool.withConnection { conn in
+            let introspector = PGCatalogIntrospector(connection: conn, logger: self.logger)
+            return try await introspector.primaryKeyColumns(for: id)
         }
     }
 }

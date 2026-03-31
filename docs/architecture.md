@@ -83,6 +83,7 @@ RLS policies can be optionally cloned (`--rls` flag or `rls: true` in YAML). The
 | 6 | Graceful SIGINT/SIGTERM signal handling with automatic rollback on interrupt |
 | 7 | Incremental schema sync (`sync` command) — detects changes via `SchemaDiffer`, generates ALTER/CREATE/DROP steps for delta application |
 | 8 | Incremental data sync (`data-sync` command) — timestamp/ID-based change detection, UPSERT via temp tables, optional delete detection, YAML state file |
+| 9 | Performance — connection pooling, parallel data transfer with dependency-aware scheduling, streaming COPY (no temp files), batched introspection queries, configurable `--parallel` concurrency with auto-detect |
 
 ### Future Work
 
@@ -90,7 +91,6 @@ RLS policies can be optionally cloned (`--rls` flag or `rls: true` in YAML). The
 |------|-------------|
 | Schema migration | Generate and apply ALTER statements from `diff` output instead of DROP/CREATE |
 | Conflict resolution | Interactive merge when target has diverged from source |
-| Performance | Parallel data transfer for independent tables, streaming COPY |
 | Observability | Structured JSON logging, OpenTelemetry traces for clone operations |
 | Migration tracking | Record applied diffs, maintain migration history and versioning |
 | Scheduled sync | Watch for schema changes and auto-sync on a schedule or continuously |
