@@ -22,6 +22,7 @@ jobs:
         run: swift test --filter PGSchemaEvoCoreTests --enable-code-coverage
 
       - name: Generate coverage report
+        id: coverage
         run: |
           BIN=$(swift build --show-bin-path)
           PROFDATA=$(find .build -name 'default.profdata' -print -quit)
@@ -39,10 +40,60 @@ jobs:
             "$TEST_BIN" \
             -ignore-filename-regex='Tests/|\.build/' \
             | tee coverage-summary.txt
+
+          # Extract total line coverage percentage from the TOTAL row
+          COVERAGE=$(tail -1 coverage-summary.txt | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\.[0-9]+%$/) last=$i} END{gsub(/%/,"",last); print last}')
+          echo "line_coverage=$COVERAGE" >> "$GITHUB_OUTPUT"
+          echo "Total line coverage: ${COVERAGE}%"
+
           echo "## Code Coverage" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           cat coverage-summary.txt >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Line coverage: ${COVERAGE}%**" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save baseline coverage (main branch)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "${{ steps.coverage.outputs.line_coverage }}" > coverage-baseline.txt
+
+      - name: Upload baseline coverage
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: coverage-baseline.txt
+          key: coverage-baseline-${{ github.sha }}
+
+      - name: Restore baseline coverage (PR)
+        if: github.event_name == 'pull_request'
+        id: baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: coverage-baseline.txt
+          key: coverage-baseline-
+          restore-keys: coverage-baseline-
+
+      - name: Check coverage regression (PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          CURRENT="${{ steps.coverage.outputs.line_coverage }}"
+          if [ -f coverage-baseline.txt ]; then
+            BASELINE=$(cat coverage-baseline.txt)
+            echo "Baseline coverage (main): ${BASELINE}%"
+            echo "Current coverage (PR):    ${CURRENT}%"
+            DROP=$(echo "$BASELINE - $CURRENT" | bc)
+            echo "Coverage change: -${DROP}%"
+            EXCEEDED=$(echo "$DROP > 1.0" | bc)
+            if [ "$EXCEEDED" = "1" ]; then
+              echo "::error::Coverage dropped by ${DROP}% (from ${BASELINE}% to ${CURRENT}%). Maximum allowed regression is 1%."
+              exit 1
+            else
+              echo "Coverage check passed."
+            fi
+          else
+            echo "No baseline coverage found — skipping regression check."
+          fi
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4

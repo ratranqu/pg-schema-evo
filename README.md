@@ -182,6 +182,26 @@ Stop the databases:
 docker compose -f docker/docker-compose.yml down
 ```
 
+### Code Coverage
+
+Generate a coverage report locally:
+
+```bash
+swift test --filter PGSchemaEvoCoreTests --enable-code-coverage
+BIN=$(swift build --show-bin-path)
+llvm-cov report \
+  -instr-profile="$(find .build -name default.profdata)" \
+  "$(find "$BIN" -name 'pg-schema-evoPackageTests' -o -name '*.xctest' | head -1)" \
+  -ignore-filename-regex='Tests/|\.build/'
+```
+
+Coverage is tracked automatically in CI. Pull requests that reduce line coverage by more than 1% will fail the coverage check.
+
+| Metric | Target |
+|--------|--------|
+| Line coverage | Maintained (max 1% regression per PR) |
+| Test suites | 16 suites, 94 tests |
+
 ## Documentation
 
 - [Getting Started Guide](docs/getting-started.md)
