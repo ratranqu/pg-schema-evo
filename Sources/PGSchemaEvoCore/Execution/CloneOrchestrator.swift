@@ -13,6 +13,15 @@ public struct CloneOrchestrator: Sendable {
     /// Execute a clone job. In dry-run mode, returns the rendered bash script.
     /// In live mode, executes each step against the target via psql.
     public func execute(job: CloneJob) async throws -> String {
+        // Pre-flight checks
+        if !job.skipPreflight && !job.dryRun {
+            let checker = PreflightChecker(logger: logger)
+            let failures = try await checker.check(job: job)
+            if !failures.isEmpty {
+                throw PGSchemaEvoError.preflightFailed(checks: failures)
+            }
+        }
+
         logger.info("Starting clone operation with \(job.objects.count) object(s)")
 
         let connection = try await PostgresConnectionHelper.connect(
@@ -59,17 +68,91 @@ public struct CloneOrchestrator: Sendable {
                 switch spec.id.type {
                 case .table:
                     let metadata = try await introspector.describeTable(spec.id)
-                    let createSQL = try tableSQLGen.generateCreate(from: metadata)
-                    steps.append(.createObject(sql: createSQL, id: spec.id))
 
-                    if spec.copyData {
-                        let size = try await introspector.relationSize(spec.id)
-                        let method = resolveTransferMethod(
-                            preferred: job.defaultDataMethod,
-                            size: size,
-                            threshold: job.dataSizeThreshold
+                    // Check for partitioned table
+                    if let partInfo = try await introspector.partitionInfo(for: spec.id) {
+                        // Create parent as partitioned table
+                        let createSQL = try tableSQLGen.generateCreate(from: metadata)
+                        // Append PARTITION BY clause
+                        let partitionedSQL = createSQL.replacingOccurrences(
+                            of: ");",
+                            with: ") PARTITION BY \(partInfo.strategy) (\(partInfo.partitionKey));",
+                            options: [],
+                            range: createSQL.range(of: ");", options: .backwards, range: nil, locale: nil) ?? createSQL.startIndex..<createSQL.endIndex
                         )
-                        steps.append(.copyData(id: spec.id, method: method, estimatedSize: size))
+                        steps.append(.createObject(sql: partitionedSQL, id: spec.id))
+
+                        // Create and attach each child partition
+                        let children = try await introspector.listPartitions(for: spec.id)
+                        for child in children {
+                            if job.dropIfExists {
+                                steps.append(.dropObject(child.id))
+                            }
+                            let childMeta = try await introspector.describeTable(child.id)
+                            let childSQL = try tableSQLGen.generateCreate(from: childMeta)
+                            steps.append(.createObject(sql: childSQL, id: child.id))
+
+                            let attachSQL = "ALTER TABLE \(spec.id.qualifiedName) ATTACH PARTITION \(child.id.qualifiedName) \(child.boundSpec);"
+                            steps.append(.attachPartition(sql: attachSQL, id: child.id))
+
+                            // Copy data for each partition if requested
+                            if spec.copyData {
+                                let size = try await introspector.relationSize(child.id)
+                                let method = resolveTransferMethod(
+                                    preferred: job.defaultDataMethod,
+                                    size: size,
+                                    threshold: job.dataSizeThreshold
+                                )
+                                let rowLimit = spec.rowLimit ?? job.globalRowLimit
+                                steps.append(.copyData(
+                                    id: child.id,
+                                    method: method,
+                                    estimatedSize: size,
+                                    whereClause: spec.whereClause,
+                                    rowLimit: rowLimit
+                                ))
+                            }
+                        }
+                    } else {
+                        let createSQL = try tableSQLGen.generateCreate(from: metadata)
+                        steps.append(.createObject(sql: createSQL, id: spec.id))
+
+                        if spec.copyData {
+                            let size = try await introspector.relationSize(spec.id)
+                            let method = resolveTransferMethod(
+                                preferred: job.defaultDataMethod,
+                                size: size,
+                                threshold: job.dataSizeThreshold
+                            )
+                            let rowLimit = spec.rowLimit ?? job.globalRowLimit
+                            steps.append(.copyData(
+                                id: spec.id,
+                                method: method,
+                                estimatedSize: size,
+                                whereClause: spec.whereClause,
+                                rowLimit: rowLimit
+                            ))
+                        }
+                    }
+
+                    // RLS policies
+                    if spec.copyRLSPolicies {
+                        let rlsInfo = try await introspector.rlsPolicies(for: spec.id)
+                        if rlsInfo.isEnabled || !rlsInfo.policies.isEmpty {
+                            var rlsSQL = ""
+                            if rlsInfo.isEnabled {
+                                rlsSQL += "ALTER TABLE \(spec.id.qualifiedName) ENABLE ROW LEVEL SECURITY;\n"
+                            }
+                            if rlsInfo.isForced {
+                                rlsSQL += "ALTER TABLE \(spec.id.qualifiedName) FORCE ROW LEVEL SECURITY;\n"
+                            }
+                            for policy in rlsInfo.policies {
+                                rlsSQL += policy.definition + "\n"
+                            }
+                            if !rlsSQL.isEmpty {
+                                steps.append(.enableRLS(sql: rlsSQL, id: spec.id))
+                            }
+                        }
                     }
 
                 case .view:
@@ -171,9 +254,51 @@ public struct CloneOrchestrator: Sendable {
                 }
             }
 
+            // Execute with retry
             let executor = LiveExecutor(logger: logger)
-            try await executor.execute(steps: steps, job: job)
+            try await executeWithRetry(executor: executor, steps: steps, job: job)
             return ""
+        }
+    }
+
+    /// Execute with transaction wrapping and retry on transient failures.
+    private func executeWithRetry(
+        executor: LiveExecutor,
+        steps: [CloneStep],
+        job: CloneJob
+    ) async throws {
+        var lastError: Error?
+
+        for attempt in 0...job.retries {
+            if attempt > 0 {
+                logger.warning("Retry attempt \(attempt)/\(job.retries)...")
+                // Exponential backoff: 2^attempt seconds
+                let delayNs = UInt64(pow(2.0, Double(attempt))) * 1_000_000_000
+                try await Task.sleep(nanoseconds: delayNs)
+            }
+
+            do {
+                try await executor.executeInTransaction(steps: steps, job: job)
+                return // Success — reset and return
+            } catch let error as PGSchemaEvoError {
+                lastError = error
+                if case .shellCommandFailed(_, let exitCode, _) = error {
+                    // Exit code 1 is usually a SQL error (not transient)
+                    // Exit code 2 is connection/transient
+                    if exitCode == 1 && attempt > 0 {
+                        logger.error("Non-transient error, stopping retries")
+                        break
+                    }
+                }
+                logger.warning("Attempt \(attempt + 1) failed: \(error.localizedDescription)")
+            } catch {
+                lastError = error
+                logger.warning("Attempt \(attempt + 1) failed: \(error.localizedDescription)")
+            }
+        }
+
+        if let lastError {
+            throw lastError
         }
     }
 

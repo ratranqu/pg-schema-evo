@@ -1,3 +1,4 @@
+import Foundation
 import PostgresNIO
 import Logging
 
@@ -811,6 +812,153 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
             results.append(ObjectIdentifier(type: .foreignDataWrapper, name: name))
         }
         return results
+    }
+
+    // MARK: - RLS Policies
+
+    public func rlsPolicies(for id: ObjectIdentifier) async throws -> RLSInfo {
+        guard let schema = id.schema else { return RLSInfo() }
+
+        // Check if RLS is enabled
+        let rlsQuery: PostgresQuery = """
+            SELECT c.relrowsecurity, c.relforcerowsecurity
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = \(schema)
+              AND c.relname = \(id.name)
+            """
+
+        let rlsRows = try await connection.query(rlsQuery, logger: logger)
+        var isEnabled = false
+        var isForced = false
+        for try await row in rlsRows {
+            let (enabled, forced) = try row.decode((Bool, Bool).self)
+            isEnabled = enabled
+            isForced = forced
+        }
+
+        // Get policies
+        let policyQuery: PostgresQuery = """
+            SELECT
+                pol.polname AS policy_name,
+                pg_catalog.pg_get_expr(pol.polqual, pol.polrelid, true) AS policy_qual,
+                pol.polcmd AS command,
+                pol.polpermissive AS permissive,
+                ARRAY(
+                    SELECT r.rolname FROM pg_catalog.pg_roles r
+                    WHERE r.oid = ANY(pol.polroles)
+                )::text[] AS roles,
+                pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid, true) AS with_check
+            FROM pg_catalog.pg_policy pol
+            JOIN pg_catalog.pg_class c ON c.oid = pol.polrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = \(schema)
+              AND c.relname = \(id.name)
+            ORDER BY pol.polname
+            """
+
+        let policyRows = try await connection.query(policyQuery, logger: logger)
+        var policies: [RLSPolicy] = []
+        for try await row in policyRows {
+            let randomAccess = row.makeRandomAccess()
+            let name = try randomAccess[0].decode(String.self)
+            let qual = try randomAccess[1].decode(String?.self)
+            let cmd = try randomAccess[2].decode(String.self)
+            let permissive = try randomAccess[3].decode(Bool.self)
+            let roles = try randomAccess[4].decode(String.self) // Array as string
+            let withCheck = try randomAccess[5].decode(String?.self)
+
+            let cmdStr: String
+            switch cmd {
+            case "r": cmdStr = "SELECT"
+            case "a": cmdStr = "INSERT"
+            case "w": cmdStr = "UPDATE"
+            case "d": cmdStr = "DELETE"
+            default: cmdStr = "ALL"
+            }
+
+            let permStr = permissive ? "PERMISSIVE" : "RESTRICTIVE"
+
+            var definition = "CREATE POLICY \(quoteIdent(name)) ON \(id.qualifiedName)"
+            definition += " AS \(permStr)"
+            definition += " FOR \(cmdStr)"
+            // Parse roles from the array string
+            let rolesClean = roles.trimmingCharacters(in: CharacterSet(charactersIn: "{}"))
+            if !rolesClean.isEmpty && rolesClean != "{}" {
+                definition += " TO \(rolesClean)"
+            }
+            if let q = qual {
+                definition += "\n    USING (\(q))"
+            }
+            if let wc = withCheck {
+                definition += "\n    WITH CHECK (\(wc))"
+            }
+            definition += ";"
+
+            policies.append(RLSPolicy(name: name, definition: definition))
+        }
+
+        return RLSInfo(isEnabled: isEnabled, isForced: isForced, policies: policies)
+    }
+
+    // MARK: - Partition Info
+
+    public func partitionInfo(for id: ObjectIdentifier) async throws -> PartitionInfo? {
+        guard let schema = id.schema else { return nil }
+
+        let query: PostgresQuery = """
+            SELECT
+                CASE pt.partstrat
+                    WHEN 'r' THEN 'RANGE'
+                    WHEN 'l' THEN 'LIST'
+                    WHEN 'h' THEN 'HASH'
+                END AS strategy,
+                pg_catalog.pg_get_partkeydef(c.oid) AS partition_key
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_catalog.pg_partitioned_table pt ON pt.partrelid = c.oid
+            WHERE n.nspname = \(schema)
+              AND c.relname = \(id.name)
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        for try await row in rows {
+            let (strategy, partKey) = try row.decode((String, String).self)
+            return PartitionInfo(strategy: strategy, partitionKey: partKey)
+        }
+        return nil
+    }
+
+    public func listPartitions(for id: ObjectIdentifier) async throws -> [PartitionChild] {
+        guard let schema = id.schema else { return [] }
+
+        let query: PostgresQuery = """
+            SELECT
+                child_ns.nspname AS child_schema,
+                child_c.relname AS child_name,
+                pg_catalog.pg_get_expr(child_c.relpartbound, child_c.oid) AS bound_spec
+            FROM pg_catalog.pg_inherits inh
+            JOIN pg_catalog.pg_class parent_c ON parent_c.oid = inh.inhparent
+            JOIN pg_catalog.pg_namespace parent_ns ON parent_ns.oid = parent_c.relnamespace
+            JOIN pg_catalog.pg_class child_c ON child_c.oid = inh.inhrelid
+            JOIN pg_catalog.pg_namespace child_ns ON child_ns.oid = child_c.relnamespace
+            WHERE parent_ns.nspname = \(schema)
+              AND parent_c.relname = \(id.name)
+            ORDER BY child_c.relname
+            """
+
+        let rows = try await connection.query(query, logger: logger)
+        var partitions: [PartitionChild] = []
+        for try await row in rows {
+            let (childSchema, childName, boundSpec) = try row.decode((String, String, String).self)
+            let childId = ObjectIdentifier(type: .table, schema: childSchema, name: childName)
+            partitions.append(PartitionChild(id: childId, boundSpec: boundSpec))
+        }
+        return partitions
+    }
+
+    private func quoteIdent(_ ident: String) -> String {
+        "\"\(ident.replacingOccurrences(of: "\"", with: "\"\""))\""
     }
 
     // MARK: - Private column/constraint/index/trigger query helpers

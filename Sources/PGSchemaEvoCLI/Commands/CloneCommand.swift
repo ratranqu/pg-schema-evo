@@ -5,7 +5,20 @@ import Logging
 struct CloneCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "clone",
-        abstract: "Clone database objects from source to target cluster"
+        abstract: "Clone database objects from source to target cluster",
+        discussion: """
+            Clones one or more PostgreSQL objects from a source to a target cluster.
+            Objects can be specified via --object flags or a YAML config file.
+
+            Examples:
+              pg-schema-evo clone --source-dsn postgresql://... --target-dsn postgresql://... \\
+                --object table:public.users --object table:public.orders --data --cascade
+
+              pg-schema-evo clone --config clone.yaml --force
+
+              pg-schema-evo clone --source-dsn postgresql://... --target-dsn postgresql://... \\
+                --object table:public.orders --data --where "orders:status = 'pending'" --row-limit 1000
+            """
     )
 
     @OptionGroup var source: SourceConnectionOptions
@@ -17,6 +30,17 @@ struct CloneCommand: AsyncParsableCommand {
         // Configure logging
         var logger = Logger(label: "pg-schema-evo")
         logger.logLevel = transfer.verbose ? .debug : .info
+
+        // Parse WHERE clauses into a map
+        var whereMap: [String: String] = [:]
+        for whereStr in transfer.where {
+            guard let colonIdx = whereStr.firstIndex(of: ":") else {
+                throw ValidationError("Invalid --where format '\(whereStr)'. Expected 'table_name:condition'")
+            }
+            let tableName = String(whereStr[whereStr.startIndex..<colonIdx])
+            let condition = String(whereStr[whereStr.index(after: colonIdx)...])
+            whereMap[tableName] = condition
+        }
 
         let job: CloneJob
 
@@ -51,8 +75,21 @@ struct CloneCommand: AsyncParsableCommand {
                     id: id,
                     copyPermissions: transfer.permissions,
                     copyData: transfer.data && id.type.supportsData,
-                    cascadeDependencies: transfer.cascade
+                    cascadeDependencies: transfer.cascade,
+                    whereClause: whereMap[id.name],
+                    rowLimit: transfer.rowLimit,
+                    copyRLSPolicies: transfer.rls
                 ))
+            }
+
+            // Apply CLI WHERE overrides to config objects
+            specs = specs.map { spec in
+                var s = spec
+                if let wh = whereMap[spec.id.name] {
+                    s.whereClause = wh
+                }
+                if transfer.rls { s.copyRLSPolicies = true }
+                return s
             }
 
             job = CloneJob(
@@ -63,7 +100,10 @@ struct CloneCommand: AsyncParsableCommand {
                 defaultDataMethod: config.defaultDataMethod,
                 dataSizeThreshold: config.dataSizeThresholdMB * 1024 * 1024,
                 dropIfExists: config.dropIfExists,
-                force: config.force
+                force: config.force,
+                retries: transfer.retries,
+                skipPreflight: transfer.skipPreflight,
+                globalRowLimit: transfer.rowLimit
             )
         } else {
             // Parse from CLI args only
@@ -87,7 +127,10 @@ struct CloneCommand: AsyncParsableCommand {
                     id: id,
                     copyPermissions: transfer.permissions,
                     copyData: transfer.data && id.type.supportsData,
-                    cascadeDependencies: transfer.cascade
+                    cascadeDependencies: transfer.cascade,
+                    whereClause: whereMap[id.name],
+                    rowLimit: transfer.rowLimit,
+                    copyRLSPolicies: transfer.rls
                 ))
             }
 
@@ -103,7 +146,10 @@ struct CloneCommand: AsyncParsableCommand {
                 defaultDataMethod: dataMethod,
                 dataSizeThreshold: transfer.dataThreshold * 1024 * 1024,
                 dropIfExists: transfer.dropExisting,
-                force: transfer.force
+                force: transfer.force,
+                retries: transfer.retries,
+                skipPreflight: transfer.skipPreflight,
+                globalRowLimit: transfer.rowLimit
             )
         }
 

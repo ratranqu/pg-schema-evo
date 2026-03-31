@@ -10,6 +10,12 @@ public struct CloneJob: Sendable {
     public let dropIfExists: Bool
     /// Skip interactive confirmation prompt.
     public let force: Bool
+    /// Maximum retry attempts for transient errors (0 = no retries).
+    public let retries: Int
+    /// Skip pre-flight validation checks.
+    public let skipPreflight: Bool
+    /// Global row limit for data copy (per-object overrides take precedence).
+    public let globalRowLimit: Int?
 
     /// Default threshold: 100 MB.
     public static let defaultDataSizeThreshold = 100 * 1024 * 1024
@@ -22,7 +28,10 @@ public struct CloneJob: Sendable {
         defaultDataMethod: TransferMethod = .auto,
         dataSizeThreshold: Int = CloneJob.defaultDataSizeThreshold,
         dropIfExists: Bool = false,
-        force: Bool = false
+        force: Bool = false,
+        retries: Int = 3,
+        skipPreflight: Bool = false,
+        globalRowLimit: Int? = nil
     ) {
         self.source = source
         self.target = target
@@ -32,5 +41,8 @@ public struct CloneJob: Sendable {
         self.dataSizeThreshold = dataSizeThreshold
         self.dropIfExists = dropIfExists
         self.force = force
+        self.retries = retries
+        self.skipPreflight = skipPreflight
+        self.globalRowLimit = globalRowLimit
     }
 }

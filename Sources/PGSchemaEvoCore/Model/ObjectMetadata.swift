@@ -316,6 +316,52 @@ public struct PgDumpMetadata: ObjectMetadata {
     }
 }
 
+// MARK: - RLS Metadata
+
+public struct RLSPolicy: Sendable {
+    public let name: String
+    public let definition: String
+
+    public init(name: String, definition: String) {
+        self.name = name
+        self.definition = definition
+    }
+}
+
+public struct RLSInfo: Sendable {
+    public let isEnabled: Bool
+    public let isForced: Bool
+    public let policies: [RLSPolicy]
+
+    public init(isEnabled: Bool = false, isForced: Bool = false, policies: [RLSPolicy] = []) {
+        self.isEnabled = isEnabled
+        self.isForced = isForced
+        self.policies = policies
+    }
+}
+
+// MARK: - Partition Metadata
+
+public struct PartitionInfo: Sendable {
+    public let strategy: String  // "RANGE", "LIST", "HASH"
+    public let partitionKey: String  // e.g. "created_at", "status"
+
+    public init(strategy: String, partitionKey: String) {
+        self.strategy = strategy
+        self.partitionKey = partitionKey
+    }
+}
+
+public struct PartitionChild: Sendable {
+    public let id: ObjectIdentifier
+    public let boundSpec: String  // e.g. "FOR VALUES FROM ('2024-01-01') TO ('2024-02-01')"
+
+    public init(id: ObjectIdentifier, boundSpec: String) {
+        self.id = id
+        self.boundSpec = boundSpec
+    }
+}
+
 // MARK: - Permission Metadata
 
 public struct PermissionGrant: Sendable {

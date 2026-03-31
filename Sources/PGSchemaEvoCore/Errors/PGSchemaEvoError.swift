@@ -27,6 +27,9 @@ public enum PGSchemaEvoError: Error, LocalizedError, Sendable {
     case configParseError(path: String, underlying: String)
     case undefinedEnvironmentVariable(name: String)
 
+    // Pre-flight
+    case preflightFailed(checks: [String])
+
     // Validation
     case invalidObjectSpec(String)
     case invalidDSN(String)
@@ -59,6 +62,8 @@ public enum PGSchemaEvoError: Error, LocalizedError, Sendable {
             "Failed to parse config file '\(path)': \(underlying)"
         case .undefinedEnvironmentVariable(let name):
             "Undefined environment variable: ${\(name)}"
+        case .preflightFailed(let checks):
+            "Pre-flight checks failed:\n\(checks.map { "  - \($0)" }.joined(separator: "\n"))"
         case .invalidObjectSpec(let message):
             "Invalid object specifier: \(message)"
         case .invalidDSN(let message):

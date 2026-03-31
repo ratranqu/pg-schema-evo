@@ -199,12 +199,18 @@ public struct ConfigLoader: Sendable {
         let copyPermissions = (dict["permissions"] as? Bool) ?? defaultPermissions
         let copyData = (dict["data"] as? Bool) ?? (type.supportsData ? defaultData : false)
         let cascade = (dict["cascade"] as? Bool) ?? defaultCascade
+        let whereClause = dict["where"] as? String
+        let rowLimit = dict["row_limit"] as? Int
+        let copyRLS = (dict["rls"] as? Bool) ?? false
 
         return ObjectSpec(
             id: id,
             copyPermissions: copyPermissions,
             copyData: copyData,
-            cascadeDependencies: cascade
+            cascadeDependencies: cascade,
+            whereClause: whereClause,
+            rowLimit: rowLimit,
+            copyRLSPolicies: copyRLS
         )
     }
 

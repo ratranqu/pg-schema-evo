@@ -15,7 +15,67 @@ public struct LiveExecutor: Sendable {
         self.logger = logger
     }
 
-    /// Execute all clone steps against the target database.
+    /// Execute all clone steps wrapped in a single transaction.
+    public func executeInTransaction(steps: [CloneStep], job: CloneJob) async throws {
+        guard let psqlPath = shell.which("psql") else {
+            throw PGSchemaEvoError.shellCommandFailed(
+                command: "psql",
+                exitCode: -1,
+                stderr: "psql not found in PATH. Install postgresql-client."
+            )
+        }
+
+        let targetDSN = job.target.toDSN()
+        let sourceDSN = job.source.toDSN()
+        let env = job.target.environment()
+        let sourceEnv = job.source.environment()
+
+        let progress = ProgressReporter(totalSteps: steps.count)
+        progress.reportStart(objectCount: job.objects.count)
+
+        // Begin transaction
+        try await executePsql(
+            psqlPath: psqlPath, dsn: targetDSN, sql: "BEGIN;",
+            env: env, description: "BEGIN transaction"
+        )
+
+        do {
+            for (index, step) in steps.enumerated() {
+                let stepNum = index + 1
+                let desc = stepDescription(step)
+                progress.reportStep(stepNum, description: desc)
+
+                try await executeStep(
+                    step: step,
+                    psqlPath: psqlPath,
+                    targetDSN: targetDSN,
+                    sourceDSN: sourceDSN,
+                    env: env,
+                    sourceEnv: sourceEnv
+                )
+
+                progress.reportStepComplete(stepNum, description: desc)
+            }
+
+            // Commit
+            try await executePsql(
+                psqlPath: psqlPath, dsn: targetDSN, sql: "COMMIT;",
+                env: env, description: "COMMIT transaction"
+            )
+        } catch {
+            // Rollback on failure
+            logger.warning("Rolling back transaction due to error...")
+            try? await executePsql(
+                psqlPath: psqlPath, dsn: targetDSN, sql: "ROLLBACK;",
+                env: env, description: "ROLLBACK transaction"
+            )
+            throw error
+        }
+
+        progress.reportComplete(stepCount: steps.count)
+    }
+
+    /// Execute all clone steps without transaction wrapping (legacy path).
     public func execute(steps: [CloneStep], job: CloneJob) async throws {
         guard let psqlPath = shell.which("psql") else {
             throw PGSchemaEvoError.shellCommandFailed(
@@ -39,66 +99,14 @@ public struct LiveExecutor: Sendable {
             progress.reportStep(stepNum, description: desc)
 
             do {
-                switch step {
-                case .dropObject(let id):
-                    let dropSQL = generateDropSQL(for: id)
-                    try await executePsql(
-                        psqlPath: psqlPath,
-                        dsn: targetDSN,
-                        sql: dropSQL,
-                        env: env,
-                        description: "DROP \(id)"
-                    )
-
-                case .createObject(let sql, let id):
-                    try await executePsql(
-                        psqlPath: psqlPath,
-                        dsn: targetDSN,
-                        sql: sql,
-                        env: env,
-                        description: "CREATE \(id)"
-                    )
-
-                case .copyData(let id, let method, _):
-                    switch method {
-                    case .copy, .auto:
-                        try await copyViaPsqlPipe(
-                            psqlPath: psqlPath,
-                            sourceDSN: sourceDSN,
-                            targetDSN: targetDSN,
-                            id: id,
-                            sourceEnv: sourceEnv,
-                            targetEnv: env
-                        )
-                    case .pgDump:
-                        try await copyViaPgDump(
-                            sourceDSN: sourceDSN,
-                            targetDSN: targetDSN,
-                            id: id,
-                            sourceEnv: sourceEnv
-                        )
-                    }
-
-                case .grantPermissions(let sql, _):
-                    try await executePsql(
-                        psqlPath: psqlPath,
-                        dsn: targetDSN,
-                        sql: sql,
-                        env: env,
-                        description: "GRANT permissions"
-                    )
-
-                case .refreshMaterializedView(let id):
-                    let sql = "REFRESH MATERIALIZED VIEW \(id.qualifiedName);"
-                    try await executePsql(
-                        psqlPath: psqlPath,
-                        dsn: targetDSN,
-                        sql: sql,
-                        env: env,
-                        description: "REFRESH \(id)"
-                    )
-                }
-
+                try await executeStep(
+                    step: step,
+                    psqlPath: psqlPath,
+                    targetDSN: targetDSN,
+                    sourceDSN: sourceDSN,
+                    env: env,
+                    sourceEnv: sourceEnv
+                )
                 progress.reportStepComplete(stepNum, description: desc)
             } catch {
                 progress.reportStepFailed(stepNum, description: desc, error: error.localizedDescription)
@@ -110,6 +118,95 @@ public struct LiveExecutor: Sendable {
     }
 
     // MARK: - Private
+
+    private func executeStep(
+        step: CloneStep,
+        psqlPath: String,
+        targetDSN: String,
+        sourceDSN: String,
+        env: [String: String],
+        sourceEnv: [String: String]
+    ) async throws {
+        switch step {
+        case .dropObject(let id):
+            let dropSQL = generateDropSQL(for: id)
+            try await executePsql(
+                psqlPath: psqlPath,
+                dsn: targetDSN,
+                sql: dropSQL,
+                env: env,
+                description: "DROP \(id)"
+            )
+
+        case .createObject(let sql, let id):
+            try await executePsql(
+                psqlPath: psqlPath,
+                dsn: targetDSN,
+                sql: sql,
+                env: env,
+                description: "CREATE \(id)"
+            )
+
+        case .copyData(let id, let method, _, let whereClause, let rowLimit):
+            switch method {
+            case .copy, .auto:
+                try await copyViaPsqlPipe(
+                    psqlPath: psqlPath,
+                    sourceDSN: sourceDSN,
+                    targetDSN: targetDSN,
+                    id: id,
+                    sourceEnv: sourceEnv,
+                    targetEnv: env,
+                    whereClause: whereClause,
+                    rowLimit: rowLimit
+                )
+            case .pgDump:
+                try await copyViaPgDump(
+                    sourceDSN: sourceDSN,
+                    targetDSN: targetDSN,
+                    id: id,
+                    sourceEnv: sourceEnv
+                )
+            }
+
+        case .grantPermissions(let sql, _):
+            try await executePsql(
+                psqlPath: psqlPath,
+                dsn: targetDSN,
+                sql: sql,
+                env: env,
+                description: "GRANT permissions"
+            )
+
+        case .refreshMaterializedView(let id):
+            let sql = "REFRESH MATERIALIZED VIEW \(id.qualifiedName);"
+            try await executePsql(
+                psqlPath: psqlPath,
+                dsn: targetDSN,
+                sql: sql,
+                env: env,
+                description: "REFRESH \(id)"
+            )
+
+        case .enableRLS(let sql, let id):
+            try await executePsql(
+                psqlPath: psqlPath,
+                dsn: targetDSN,
+                sql: sql,
+                env: env,
+                description: "ENABLE RLS \(id)"
+            )
+
+        case .attachPartition(let sql, let id):
+            try await executePsql(
+                psqlPath: psqlPath,
+                dsn: targetDSN,
+                sql: sql,
+                env: env,
+                description: "ATTACH PARTITION \(id)"
+            )
+        }
+    }
 
     private func executePsql(
         psqlPath: String,
@@ -143,15 +240,24 @@ public struct LiveExecutor: Sendable {
         targetDSN: String,
         id: ObjectIdentifier,
         sourceEnv: [String: String],
-        targetEnv: [String: String]
+        targetEnv: [String: String],
+        whereClause: String? = nil,
+        rowLimit: Int? = nil
     ) async throws {
+        let copySource: String
+        if whereClause != nil || rowLimit != nil {
+            var query = "SELECT * FROM \(id.qualifiedName)"
+            if let wh = whereClause { query += " WHERE \(wh)" }
+            if let lim = rowLimit { query += " LIMIT \(lim)" }
+            copySource = "\\copy (\(query)) TO STDOUT WITH (FORMAT csv, HEADER)"
+        } else {
+            copySource = "\\copy \(id.qualifiedName) TO STDOUT WITH (FORMAT csv, HEADER)"
+        }
+
         // Export from source
         let exportResult = try await shell.run(
             command: psqlPath,
-            arguments: [
-                sourceDSN,
-                "-c", "\\copy \(id.qualifiedName) TO STDOUT WITH (FORMAT csv, HEADER)"
-            ],
+            arguments: [sourceDSN, "-c", copySource],
             environment: sourceEnv
         )
 
@@ -273,9 +379,11 @@ public struct LiveExecutor: Sendable {
         switch step {
         case .dropObject(let id): "Drop \(id.type.displayName) \(id)"
         case .createObject(_, let id): "Create \(id.type.displayName) \(id)"
-        case .copyData(let id, let method, _): "Copy data for \(id) via \(method.rawValue)"
+        case .copyData(let id, let method, _, _, _): "Copy data for \(id) via \(method.rawValue)"
         case .grantPermissions(_, let id): "Grant permissions on \(id)"
         case .refreshMaterializedView(let id): "Refresh materialized view \(id)"
+        case .enableRLS(_, let id): "Enable RLS on \(id)"
+        case .attachPartition(_, let id): "Attach partition \(id)"
         }
     }
 
