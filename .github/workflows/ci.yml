@@ -18,8 +18,39 @@ jobs:
       - name: Build
         run: swift build
 
-      - name: Run unit tests
-        run: swift test --filter PGSchemaEvoCoreTests
+      - name: Run unit tests with coverage
+        run: swift test --filter PGSchemaEvoCoreTests --enable-code-coverage
+
+      - name: Generate coverage report
+        run: |
+          BIN=$(swift build --show-bin-path)
+          PROFDATA=$(find .build -name 'default.profdata' -print -quit)
+          TEST_BIN=$(find "$BIN" -name '*.xctest' -print -quit)
+          if [ -z "$TEST_BIN" ]; then
+            TEST_BIN=$(find "$BIN" -name 'pg-schema-evoPackageTests' -print -quit)
+          fi
+          llvm-cov export -format=lcov \
+            -instr-profile="$PROFDATA" \
+            "$TEST_BIN" \
+            -ignore-filename-regex='Tests/|\.build/' \
+            > coverage.lcov
+          llvm-cov report \
+            -instr-profile="$PROFDATA" \
+            "$TEST_BIN" \
+            -ignore-filename-regex='Tests/|\.build/' \
+            | tee coverage-summary.txt
+          echo "## Code Coverage" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat coverage-summary.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.lcov
+            coverage-summary.txt
 
   integration-tests:
     name: Integration Tests
