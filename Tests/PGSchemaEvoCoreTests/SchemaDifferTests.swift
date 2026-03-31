@@ -1039,6 +1039,7 @@ private final class MockDiffIntrospector: SchemaIntrospector, @unchecked Sendabl
     func rlsPolicies(for id: ObjectIdentifier) async throws -> RLSInfo { RLSInfo() }
     func partitionInfo(for id: ObjectIdentifier) async throws -> PartitionInfo? { nil }
     func listPartitions(for id: ObjectIdentifier) async throws -> [PartitionChild] { [] }
+    func primaryKeyColumns(for id: ObjectIdentifier) async throws -> [String] { [] }
 }
 
 /// Configurable introspector that allows per-object metadata to be set for detailed diff testing.
@@ -1145,4 +1146,5 @@ private final class ConfigurableDiffIntrospector: SchemaIntrospector, @unchecked
     func rlsPolicies(for id: ObjectIdentifier) async throws -> RLSInfo { RLSInfo() }
     func partitionInfo(for id: ObjectIdentifier) async throws -> PartitionInfo? { nil }
     func listPartitions(for id: ObjectIdentifier) async throws -> [PartitionChild] { [] }
+    func primaryKeyColumns(for id: ObjectIdentifier) async throws -> [String] { [] }
 }

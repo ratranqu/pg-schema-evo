@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 import PostgresNIO
 import Logging
 @testable import PGSchemaEvoCore
@@ -10,12 +11,12 @@ struct DataSyncIntegrationTests {
     func primaryKeyColumns() async throws {
         let sourceConfig = try IntegrationTestConfig.sourceConfig()
         let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
-        defer { Task { try? await sourceConn.close() } }
 
         let introspector = PGCatalogIntrospector(connection: sourceConn, logger: IntegrationTestConfig.logger)
         let pkCols = try await introspector.primaryKeyColumns(
             for: ObjectIdentifier(type: .table, schema: "public", name: "users")
         )
+        try await sourceConn.close()
 
         #expect(pkCols == ["id"])
     }
@@ -24,14 +25,13 @@ struct DataSyncIntegrationTests {
     func primaryKeyColumnsPartitioned() async throws {
         let sourceConfig = try IntegrationTestConfig.sourceConfig()
         let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
-        defer { Task { try? await sourceConn.close() } }
 
         let introspector = PGCatalogIntrospector(connection: sourceConn, logger: IntegrationTestConfig.logger)
         let pkCols = try await introspector.primaryKeyColumns(
             for: ObjectIdentifier(type: .table, schema: "public", name: "events")
         )
+        try await sourceConn.close()
 
-        // The events table is partitioned and has no explicit PK
         #expect(pkCols.isEmpty)
     }
 
@@ -42,7 +42,7 @@ struct DataSyncIntegrationTests {
 
         let job = DataSyncJob(
             source: sourceConfig,
-            target: sourceConfig, // not used for init
+            target: sourceConfig,
             tables: [
                 DataSyncTableConfig(
                     id: ObjectIdentifier(type: .table, schema: "public", name: "products"),
@@ -58,7 +58,6 @@ struct DataSyncIntegrationTests {
         #expect(output.contains("public.products"))
         #expect(output.contains("created_at"))
 
-        // Verify state file was written
         let store = DataSyncStateStore()
         let state = try store.load(path: stateFile)
         #expect(state.tables.count == 1)
@@ -118,41 +117,29 @@ struct DataSyncIntegrationTests {
         let sourceConfig = try IntegrationTestConfig.sourceConfig()
         let targetConfig = try IntegrationTestConfig.targetConfig()
 
-        // Set up target with the same table
-        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
-        try await IntegrationTestConfig.execute("""
-            DROP TABLE IF EXISTS public.data_sync_test CASCADE;
-            CREATE TABLE public.data_sync_test (
-                id integer PRIMARY KEY,
-                value text,
-                updated_at timestamp with time zone NOT NULL DEFAULT now()
-            );
-            """, on: targetConn)
-
-        // Create source table with data
-        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
-        try await IntegrationTestConfig.execute("""
-            DROP TABLE IF EXISTS public.data_sync_test CASCADE;
-            CREATE TABLE public.data_sync_test (
-                id integer PRIMARY KEY,
-                value text,
-                updated_at timestamp with time zone NOT NULL DEFAULT now()
-            );
-            INSERT INTO public.data_sync_test (id, value, updated_at) VALUES
-                (1, 'hello', '2026-03-01 00:00:00+00'),
-                (2, 'world', '2026-03-02 00:00:00+00');
-            """, on: sourceConn)
-
-        defer {
-            Task {
-                try? await IntegrationTestConfig.execute(
-                    "DROP TABLE IF EXISTS public.data_sync_test CASCADE", on: sourceConn)
-                try? await IntegrationTestConfig.execute(
-                    "DROP TABLE IF EXISTS public.data_sync_test CASCADE", on: targetConn)
-                try? await sourceConn.close()
-                try? await targetConn.close()
-            }
+        // Setup: create test table on source via psql
+        let shell = ShellRunner()
+        guard let psqlPath = shell.which("psql") else {
+            throw PGSchemaEvoError.shellCommandFailed(command: "psql", exitCode: -1, stderr: "psql not found")
         }
+        let sourceDSN = sourceConfig.toDSN()
+        let sourceEnv = sourceConfig.environment()
+
+        _ = try await shell.run(
+            command: psqlPath,
+            arguments: [sourceDSN, "-c", """
+                DROP TABLE IF EXISTS public.data_sync_test CASCADE;
+                CREATE TABLE public.data_sync_test (
+                    id integer PRIMARY KEY,
+                    value text,
+                    updated_at timestamp with time zone NOT NULL DEFAULT now()
+                );
+                INSERT INTO public.data_sync_test (id, value, updated_at) VALUES
+                    (1, 'hello', '2026-03-01 00:00:00+00'),
+                    (2, 'world', '2026-03-02 00:00:00+00');
+                """],
+            environment: sourceEnv
+        )
 
         // Init state with current max
         let stateFile = NSTemporaryDirectory() + "data-sync-test-\(UUID().uuidString).yaml"
@@ -182,6 +169,13 @@ struct DataSyncIntegrationTests {
 
         let output = try await orchestrator.run(job: runJob)
         #expect(output.contains("no changes"))
+
+        // Cleanup
+        _ = try await shell.run(
+            command: psqlPath,
+            arguments: [sourceDSN, "-c", "DROP TABLE IF EXISTS public.data_sync_test CASCADE;"],
+            environment: sourceEnv
+        )
     }
 
     @Test("Data sync run upserts new and modified rows")
@@ -189,10 +183,15 @@ struct DataSyncIntegrationTests {
         let sourceConfig = try IntegrationTestConfig.sourceConfig()
         let targetConfig = try IntegrationTestConfig.targetConfig()
 
-        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
-        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
+        let shell = ShellRunner()
+        guard let psqlPath = shell.which("psql") else {
+            throw PGSchemaEvoError.shellCommandFailed(command: "psql", exitCode: -1, stderr: "psql not found")
+        }
+        let sourceDSN = sourceConfig.toDSN()
+        let targetDSN = targetConfig.toDSN()
+        let sourceEnv = sourceConfig.environment()
+        let targetEnv = targetConfig.environment()
 
-        // Create identical tables on both
         let ddl = """
             DROP TABLE IF EXISTS public.sync_upsert_test CASCADE;
             CREATE TABLE public.sync_upsert_test (
@@ -201,33 +200,22 @@ struct DataSyncIntegrationTests {
                 updated_at timestamp with time zone NOT NULL DEFAULT now()
             );
             """
-        try await IntegrationTestConfig.execute(ddl, on: sourceConn)
-        try await IntegrationTestConfig.execute(ddl, on: targetConn)
+        _ = try await shell.run(command: psqlPath, arguments: [sourceDSN, "-c", ddl], environment: sourceEnv)
+        _ = try await shell.run(command: psqlPath, arguments: [targetDSN, "-c", ddl], environment: targetEnv)
 
-        // Insert initial data on source
-        try await IntegrationTestConfig.execute("""
-            INSERT INTO public.sync_upsert_test (id, value, updated_at) VALUES
-                (1, 'original', '2026-03-01 00:00:00+00');
-            """, on: sourceConn)
+        // Insert initial data on both
+        _ = try await shell.run(
+            command: psqlPath,
+            arguments: [sourceDSN, "-c", "INSERT INTO public.sync_upsert_test (id, value, updated_at) VALUES (1, 'original', '2026-03-01 00:00:00+00');"],
+            environment: sourceEnv
+        )
+        _ = try await shell.run(
+            command: psqlPath,
+            arguments: [targetDSN, "-c", "INSERT INTO public.sync_upsert_test (id, value, updated_at) VALUES (1, 'original', '2026-03-01 00:00:00+00');"],
+            environment: targetEnv
+        )
 
-        // Also insert on target (same row)
-        try await IntegrationTestConfig.execute("""
-            INSERT INTO public.sync_upsert_test (id, value, updated_at) VALUES
-                (1, 'original', '2026-03-01 00:00:00+00');
-            """, on: targetConn)
-
-        defer {
-            Task {
-                try? await IntegrationTestConfig.execute(
-                    "DROP TABLE IF EXISTS public.sync_upsert_test CASCADE", on: sourceConn)
-                try? await IntegrationTestConfig.execute(
-                    "DROP TABLE IF EXISTS public.sync_upsert_test CASCADE", on: targetConn)
-                try? await sourceConn.close()
-                try? await targetConn.close()
-            }
-        }
-
-        // Init state to "before" the first row
+        // Write state to "before" the first row
         let stateFile = NSTemporaryDirectory() + "data-sync-test-\(UUID().uuidString).yaml"
         let stateStore = DataSyncStateStore()
         try stateStore.save(
@@ -240,12 +228,15 @@ struct DataSyncIntegrationTests {
             path: stateFile
         )
 
-        // Now update the row on source and add a new row
-        try await IntegrationTestConfig.execute("""
-            UPDATE public.sync_upsert_test SET value = 'updated', updated_at = '2026-03-15 00:00:00+00' WHERE id = 1;
-            INSERT INTO public.sync_upsert_test (id, value, updated_at) VALUES
-                (2, 'new_row', '2026-03-15 00:00:00+00');
-            """, on: sourceConn)
+        // Update source: modify existing row and add new row
+        _ = try await shell.run(
+            command: psqlPath,
+            arguments: [sourceDSN, "-c", """
+                UPDATE public.sync_upsert_test SET value = 'updated', updated_at = '2026-03-15 00:00:00+00' WHERE id = 1;
+                INSERT INTO public.sync_upsert_test (id, value, updated_at) VALUES (2, 'new_row', '2026-03-15 00:00:00+00');
+                """],
+            environment: sourceEnv
+        )
 
         // Run sync
         let orchestrator = DataSyncOrchestrator(logger: IntegrationTestConfig.logger)
@@ -260,22 +251,20 @@ struct DataSyncIntegrationTests {
         let output = try await orchestrator.run(job: runJob)
         #expect(output.contains("synced"))
 
-        // Verify target has the updated and new rows
-        let rows = try await targetConn.query(
-            "SELECT id, value FROM public.sync_upsert_test ORDER BY id",
-            logger: IntegrationTestConfig.logger
+        // Verify target via psql query
+        let verifyResult = try await shell.run(
+            command: psqlPath,
+            arguments: [targetDSN, "-t", "-A", "-c", "SELECT id, value FROM public.sync_upsert_test ORDER BY id;"],
+            environment: targetEnv
         )
-        var results: [(Int, String)] = []
-        for try await row in rows {
-            let (id, value) = try row.decode((Int, String).self)
-            results.append((id, value))
-        }
+        let lines = verifyResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n")
+        #expect(lines.count == 2)
+        #expect(lines[0].contains("updated"))
+        #expect(lines[1].contains("new_row"))
 
-        #expect(results.count == 2)
-        #expect(results[0].0 == 1)
-        #expect(results[0].1 == "updated")
-        #expect(results[1].0 == 2)
-        #expect(results[1].1 == "new_row")
+        // Cleanup
+        _ = try await shell.run(command: psqlPath, arguments: [sourceDSN, "-c", "DROP TABLE IF EXISTS public.sync_upsert_test CASCADE;"], environment: sourceEnv)
+        _ = try await shell.run(command: psqlPath, arguments: [targetDSN, "-c", "DROP TABLE IF EXISTS public.sync_upsert_test CASCADE;"], environment: targetEnv)
     }
 
     @Test("Data sync dry-run produces script without executing")
@@ -283,25 +272,26 @@ struct DataSyncIntegrationTests {
         let sourceConfig = try IntegrationTestConfig.sourceConfig()
         let targetConfig = try IntegrationTestConfig.targetConfig()
 
-        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
-
-        try await IntegrationTestConfig.execute("""
-            DROP TABLE IF EXISTS public.dry_run_test CASCADE;
-            CREATE TABLE public.dry_run_test (
-                id integer PRIMARY KEY,
-                value text,
-                seq_id integer NOT NULL DEFAULT 0
-            );
-            INSERT INTO public.dry_run_test (id, value, seq_id) VALUES (1, 'test', 10);
-            """, on: sourceConn)
-
-        defer {
-            Task {
-                try? await IntegrationTestConfig.execute(
-                    "DROP TABLE IF EXISTS public.dry_run_test CASCADE", on: sourceConn)
-                try? await sourceConn.close()
-            }
+        let shell = ShellRunner()
+        guard let psqlPath = shell.which("psql") else {
+            throw PGSchemaEvoError.shellCommandFailed(command: "psql", exitCode: -1, stderr: "psql not found")
         }
+        let sourceDSN = sourceConfig.toDSN()
+        let sourceEnv = sourceConfig.environment()
+
+        _ = try await shell.run(
+            command: psqlPath,
+            arguments: [sourceDSN, "-c", """
+                DROP TABLE IF EXISTS public.dry_run_test CASCADE;
+                CREATE TABLE public.dry_run_test (
+                    id integer PRIMARY KEY,
+                    value text,
+                    seq_id integer NOT NULL DEFAULT 0
+                );
+                INSERT INTO public.dry_run_test (id, value, seq_id) VALUES (1, 'test', 10);
+                """],
+            environment: sourceEnv
+        )
 
         // Write state with seq_id = 0 (so all rows are "new")
         let stateFile = NSTemporaryDirectory() + "data-sync-test-\(UUID().uuidString).yaml"
@@ -326,5 +316,12 @@ struct DataSyncIntegrationTests {
         let output = try await orchestrator.run(job: runJob)
         #expect(output.contains("Dry-run"))
         #expect(output.contains("1 row(s) to sync"))
+
+        // Cleanup
+        _ = try await shell.run(
+            command: psqlPath,
+            arguments: [sourceDSN, "-c", "DROP TABLE IF EXISTS public.dry_run_test CASCADE;"],
+            environment: sourceEnv
+        )
     }
 }

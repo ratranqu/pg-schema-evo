@@ -419,6 +419,7 @@ private final class ConfigurableMockIntrospector: SchemaIntrospector, @unchecked
     func rlsPolicies(for id: ObjectIdentifier) async throws -> RLSInfo { RLSInfo() }
     func partitionInfo(for id: ObjectIdentifier) async throws -> PartitionInfo? { nil }
     func listPartitions(for id: ObjectIdentifier) async throws -> [PartitionChild] { [] }
+    func primaryKeyColumns(for id: ObjectIdentifier) async throws -> [String] { [] }
 }
 
 // Minimal mock introspector for testing dependency resolution without a database
@@ -460,4 +461,5 @@ private final class MockIntrospector: SchemaIntrospector, @unchecked Sendable {
     func rlsPolicies(for id: ObjectIdentifier) async throws -> RLSInfo { RLSInfo() }
     func partitionInfo(for id: ObjectIdentifier) async throws -> PartitionInfo? { nil }
     func listPartitions(for id: ObjectIdentifier) async throws -> [PartitionChild] { [] }
+    func primaryKeyColumns(for id: ObjectIdentifier) async throws -> [String] { [] }
 }
