@@ -865,7 +865,7 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
             let qual = try randomAccess[1].decode(String?.self)
             let cmd = try randomAccess[2].decode(String.self)
             let permissive = try randomAccess[3].decode(Bool.self)
-            let roles = try randomAccess[4].decode(String.self) // Array as string
+            let roles = try randomAccess[4].decode([String].self)
             let withCheck = try randomAccess[5].decode(String?.self)
 
             let cmdStr: String
@@ -882,10 +882,8 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
             var definition = "CREATE POLICY \(quoteIdent(name)) ON \(id.qualifiedName)"
             definition += " AS \(permStr)"
             definition += " FOR \(cmdStr)"
-            // Parse roles from the array string
-            let rolesClean = roles.trimmingCharacters(in: CharacterSet(charactersIn: "{}"))
-            if !rolesClean.isEmpty && rolesClean != "{}" {
-                definition += " TO \(rolesClean)"
+            if !roles.isEmpty {
+                definition += " TO \(roles.joined(separator: ", "))"
             }
             if let q = qual {
                 definition += "\n    USING (\(q))"
