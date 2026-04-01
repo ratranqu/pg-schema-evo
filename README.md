@@ -200,7 +200,7 @@ llvm-cov report \
 | Metric | Value |
 |--------|-------|
 | Line coverage | **77.18%** (max 1% regression per PR) |
-| Test suites | 32 suites, 483 tests (unit + integration) |
+| Test suites | 33 suites, 498 tests (unit + integration) |
 
 > Coverage is automatically updated in this README on each merge to main.
 
@@ -212,4 +212,4 @@ llvm-cov report \
 
 ## Status
 
-Version 0.4.0 — Performance: connection pooling, parallel data transfer with dependency-aware scheduling (`--parallel`), streaming COPY (source→target pipe, no temp files), batched introspection queries, auto-detect concurrency. Enhanced schema migration: `diff --sql` now produces complete migration scripts with DROP COLUMN/CONSTRAINT/INDEX support, trigger comparison (CREATE/DROP/replace), RLS policy comparison (ENABLE/DISABLE/FORCE, CREATE/DROP POLICY), and safety flags (`--include-destructive` for diff, `--allow-drop-columns` for sync). Destructive changes are reported but skipped by default. Prior: incremental data sync (`data-sync` command), selective cloning with dry-run and live modes, dependency resolution, schema diffing, YAML config files, partitioned tables, RLS policies, selective data filters, pre-flight validation, and retry with rollback.
+Version 0.4.1 — Expanded integration test coverage: 15 new integration tests covering sync allowDropColumns (skip/drop column, drop constraint), column type alteration, column addition, diff --sql with destructive flag, RLS policy introspection and cloning, trigger difference detection, trigger drop via sync, RLS policy diff comparison, and partitioned table introspection/cloning. Fixed RLS policy SQL generation bug (roles array decoding). Prior: performance enhancements (connection pooling, parallel data transfer, streaming COPY), enhanced schema migration with `diff --sql` complete migration scripts, DROP COLUMN/CONSTRAINT/INDEX support, trigger comparison, RLS policy comparison, safety flags, incremental data sync, selective cloning, dependency resolution, schema diffing, YAML config files, partitioned tables, RLS policies, selective data filters, pre-flight validation, and retry with rollback.
