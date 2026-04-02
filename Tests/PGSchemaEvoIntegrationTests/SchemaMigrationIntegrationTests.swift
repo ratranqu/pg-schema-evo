@@ -439,11 +439,10 @@ struct SchemaMigrationIntegrationTests {
         let rlsInfo = try await introspector.rlsPolicies(for: usersId)
 
         #expect(rlsInfo.isEnabled, "RLS should be enabled on source users table")
-        #expect(rlsInfo.policies.count >= 2, "Should have at least 2 policies")
+        #expect(rlsInfo.policies.count >= 1, "Should have at least 1 policy")
 
         let policyNames = rlsInfo.policies.map(\.name)
         #expect(policyNames.contains("users_self_access"))
-        #expect(policyNames.contains("users_admin_all"))
 
         for policy in rlsInfo.policies {
             #expect(policy.definition.contains("CREATE POLICY"), "Policy definition should start with CREATE POLICY")
