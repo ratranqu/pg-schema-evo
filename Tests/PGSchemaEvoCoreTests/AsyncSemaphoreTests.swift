@@ -36,20 +36,23 @@ struct AsyncSemaphoreTests {
     @Test("Multiple concurrent waiters are serialized")
     func multipleConcurrentWaiters() async {
         let sem = AsyncSemaphore(count: 2)
-        var counter = 0
 
-        await withTaskGroup(of: Void.self) { group in
-            for _ in 0..<4 {
+        // Each task acquires then releases a permit; all 4 should complete.
+        await withTaskGroup(of: Int.self) { group in
+            for i in 0..<4 {
                 group.addTask {
                     await sem.wait()
-                    // Simulate work
-                    counter += 1
                     sem.signal()
+                    return i
                 }
             }
-        }
 
-        #expect(counter == 4)
+            var results: [Int] = []
+            for await value in group {
+                results.append(value)
+            }
+            #expect(results.count == 4)
+        }
     }
 
     @Test("totalCount reflects initial count")
