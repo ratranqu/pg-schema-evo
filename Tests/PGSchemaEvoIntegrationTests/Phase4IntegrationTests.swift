@@ -49,10 +49,13 @@ struct Phase4IntegrationTests {
         let targetIntrospector = PGCatalogIntrospector(connection: targetConn, logger: IntegrationTestConfig.logger)
 
         let differ = SchemaDiffer(logger: IntegrationTestConfig.logger)
+        // Limit to tables to avoid TOCTOU races with sequences/enums
+        // being concurrently dropped by other test suites
         let result = try await differ.diff(
             source: sourceIntrospector,
             target: targetIntrospector,
-            schema: "public"
+            schema: "public",
+            types: [.table]
         )
 
         let text = result.renderText()
@@ -167,6 +170,7 @@ struct Phase4IntegrationTests {
                 ),
             ],
             dryRun: false,
+            dropIfExists: true,
             force: true,
             skipPreflight: true
         )
@@ -174,8 +178,9 @@ struct Phase4IntegrationTests {
         let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
         _ = try await orchestrator.execute(job: job)
 
-        // Verify filtered data was copied (only products with price > 20)
-        let rows = try await targetConn.query(
+        // Verify with fresh connection to avoid stale state
+        let vc = try await IntegrationTestConfig.connect(to: targetConfig)
+        let rows = try await vc.query(
             "SELECT count(*) FROM public.products",
             logger: IntegrationTestConfig.logger
         )
@@ -184,6 +189,7 @@ struct Phase4IntegrationTests {
             // Source has 4 products, only 2 have price > 20 (Widget B=24.99, Gadget X=49.99)
             #expect(count == 2)
         }
+        try? await vc.close()
 
         try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.products CASCADE", on: targetConn)
     }
@@ -208,6 +214,7 @@ struct Phase4IntegrationTests {
                 ),
             ],
             dryRun: false,
+            dropIfExists: true,
             force: true,
             skipPreflight: true
         )
@@ -215,7 +222,8 @@ struct Phase4IntegrationTests {
         let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
         _ = try await orchestrator.execute(job: job)
 
-        let rows = try await targetConn.query(
+        let vc = try await IntegrationTestConfig.connect(to: targetConfig)
+        let rows = try await vc.query(
             "SELECT count(*) FROM public.products",
             logger: IntegrationTestConfig.logger
         )
@@ -223,6 +231,7 @@ struct Phase4IntegrationTests {
             let count = try row.decode(Int.self)
             #expect(count == 2)
         }
+        try? await vc.close()
 
         try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.products CASCADE", on: targetConn)
     }
