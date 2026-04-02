@@ -6,6 +6,13 @@ import Logging
 @Suite("Phase 4 Integration Tests", .tags(.integration), .serialized)
 struct Phase4IntegrationTests {
 
+    // Dedicated schema for Phase4 test objects to avoid concurrent interference
+    private static let testSchema = "_phase4_test"
+
+    private static func ensureTestSchema(on conn: PostgresConnection) async throws {
+        try await IntegrationTestConfig.execute("CREATE SCHEMA IF NOT EXISTS \(testSchema)", on: conn)
+    }
+
     @Test("Schema diff detects objects only in source")
     func schemaDiffOnlyInSource() async throws {
         let sourceConfig = try IntegrationTestConfig.sourceConfig()
@@ -36,6 +43,7 @@ struct Phase4IntegrationTests {
 
     @Test("Schema diff renders text output")
     func schemaDiffTextOutput() async throws {
+        // Use dedicated test table to avoid TOCTOU races with concurrent suites
         let sourceConfig = try IntegrationTestConfig.sourceConfig()
         let targetConfig = try IntegrationTestConfig.targetConfig()
         let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
@@ -45,21 +53,30 @@ struct Phase4IntegrationTests {
             Task { try? await targetConn.close() }
         }
 
+        // Create isolated test tables for a clean diff
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await Self.ensureTestSchema(on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_test CASCADE", on: sourceConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_test CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).diff_test (id integer PRIMARY KEY, name text)
+        """, on: sourceConn)
+
         let sourceIntrospector = PGCatalogIntrospector(connection: sourceConn, logger: IntegrationTestConfig.logger)
         let targetIntrospector = PGCatalogIntrospector(connection: targetConn, logger: IntegrationTestConfig.logger)
 
         let differ = SchemaDiffer(logger: IntegrationTestConfig.logger)
-        // Limit to tables to avoid TOCTOU races with sequences/enums
-        // being concurrently dropped by other test suites
         let result = try await differ.diff(
             source: sourceIntrospector,
             target: targetIntrospector,
-            schema: "public",
+            schema: Self.testSchema,
             types: [.table]
         )
 
         let text = result.renderText()
         #expect(text.contains("Summary:"))
+
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_test CASCADE", on: sourceConn)
     }
 
     @Test("Pre-flight checker validates source connectivity")
@@ -154,17 +171,36 @@ struct Phase4IntegrationTests {
     func liveCloneWithWhereFilter() async throws {
         let sourceConfig = try IntegrationTestConfig.sourceConfig()
         let targetConfig = try IntegrationTestConfig.targetConfig()
+        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
-        defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.products CASCADE", on: targetConn)
+        // Create isolated test table to avoid concurrent interference with LiveExecutionIntegrationTests
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await Self.ensureTestSchema(on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).products CASCADE", on: sourceConn)
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).products (
+                id integer PRIMARY KEY,
+                name text NOT NULL,
+                price numeric(10,2) NOT NULL DEFAULT 0
+            )
+        """, on: sourceConn)
+        try await IntegrationTestConfig.execute("""
+            INSERT INTO \(Self.testSchema).products (id, name, price) VALUES
+            (1, 'Widget A', 9.99), (2, 'Widget B', 24.99),
+            (3, 'Gadget X', 49.99), (4, 'Gizmo Z', 4.99)
+        """, on: sourceConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).products CASCADE", on: targetConn)
+
+        try? await sourceConn.close()
+        try? await targetConn.close()
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: "products"),
+                    id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: "products"),
                     copyData: true,
                     whereClause: "price > 20"
                 ),
@@ -172,43 +208,69 @@ struct Phase4IntegrationTests {
             dryRun: false,
             dropIfExists: true,
             force: true,
+            retries: 0,
             skipPreflight: true
         )
 
         let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
         _ = try await orchestrator.execute(job: job)
 
-        // Verify with fresh connection to avoid stale state
+        // Verify with fresh connection
         let vc = try await IntegrationTestConfig.connect(to: targetConfig)
         let rows = try await vc.query(
-            "SELECT count(*) FROM public.products",
+            "SELECT count(*) FROM \(Self.testSchema).products",
             logger: IntegrationTestConfig.logger
         )
         for try await row in rows {
             let count = try row.decode(Int.self)
-            // Source has 4 products, only 2 have price > 20 (Widget B=24.99, Gadget X=49.99)
+            // 4 products total, only 2 have price > 20 (Widget B=24.99, Gadget X=49.99)
             #expect(count == 2)
         }
         try? await vc.close()
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.products CASCADE", on: targetConn)
+        // Clean up
+        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let tc = try await IntegrationTestConfig.connect(to: targetConfig)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).products CASCADE", on: sc)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).products CASCADE", on: tc)
+        try? await sc.close()
+        try? await tc.close()
     }
 
     @Test("Live clone with row limit restricts data")
     func liveCloneWithRowLimit() async throws {
         let sourceConfig = try IntegrationTestConfig.sourceConfig()
         let targetConfig = try IntegrationTestConfig.targetConfig()
+        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
-        defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.products CASCADE", on: targetConn)
+        // Create isolated test table
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await Self.ensureTestSchema(on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).products CASCADE", on: sourceConn)
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).products (
+                id integer PRIMARY KEY,
+                name text NOT NULL,
+                price numeric(10,2) NOT NULL DEFAULT 0
+            )
+        """, on: sourceConn)
+        try await IntegrationTestConfig.execute("""
+            INSERT INTO \(Self.testSchema).products (id, name, price) VALUES
+            (1, 'Widget A', 9.99), (2, 'Widget B', 24.99),
+            (3, 'Gadget X', 49.99), (4, 'Gizmo Z', 4.99)
+        """, on: sourceConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).products CASCADE", on: targetConn)
+
+        try? await sourceConn.close()
+        try? await targetConn.close()
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: "products"),
+                    id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: "products"),
                     copyData: true,
                     rowLimit: 2
                 ),
@@ -216,6 +278,7 @@ struct Phase4IntegrationTests {
             dryRun: false,
             dropIfExists: true,
             force: true,
+            retries: 0,
             skipPreflight: true
         )
 
@@ -224,7 +287,7 @@ struct Phase4IntegrationTests {
 
         let vc = try await IntegrationTestConfig.connect(to: targetConfig)
         let rows = try await vc.query(
-            "SELECT count(*) FROM public.products",
+            "SELECT count(*) FROM \(Self.testSchema).products",
             logger: IntegrationTestConfig.logger
         )
         for try await row in rows {
@@ -233,6 +296,12 @@ struct Phase4IntegrationTests {
         }
         try? await vc.close()
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.products CASCADE", on: targetConn)
+        // Clean up
+        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let tc = try await IntegrationTestConfig.connect(to: targetConfig)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).products CASCADE", on: sc)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).products CASCADE", on: tc)
+        try? await sc.close()
+        try? await tc.close()
     }
 }
