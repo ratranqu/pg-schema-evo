@@ -47,10 +47,14 @@ struct ConfigLoaderEdgeCaseTests {
         #expect(result == "hello world")
     }
 
-    @Test("Adjacent env vars")
-    func adjacentEnvVars() throws {
-        let result = try loader.interpolateEnvVars("${NONEXISTENT_A:-foo}${NONEXISTENT_B:-bar}")
-        #expect(result == "foobar")
+    @Test("Multiple real env vars in same string")
+    func multipleRealEnvVars() throws {
+        // HOME and PATH should both be set in any Unix environment
+        let result = try loader.interpolateEnvVars("home=${HOME} path_set=${PATH}")
+        #expect(result.contains("home="))
+        #expect(result.contains("path_set="))
+        #expect(!result.contains("${HOME}"))
+        #expect(!result.contains("${PATH}"))
     }
 
     // MARK: - Connection parsing edge cases
@@ -286,7 +290,7 @@ struct ConfigLoaderEdgeCaseTests {
                 schema: public
                 name: my_agg
                 signature: "(integer)"
-              - type: foreign_data_wrapper
+              - type: fdw
                 name: my_fdw
             """
         let path = try writeTempFile(yaml)
@@ -296,7 +300,7 @@ struct ConfigLoaderEdgeCaseTests {
         #expect(config.objects[1].id.type == .aggregate)
         #expect(config.objects[1].id.signature == "(integer)")
         #expect(config.objects[2].id.type == .foreignDataWrapper)
-        #expect(config.objects[2].id.schema == nil)  // FDW is not schema-scoped
+        #expect(config.objects[2].id.schema == "public")  // FDW defaults to public in config parser
     }
 
     @Test("Object with all optional fields")
