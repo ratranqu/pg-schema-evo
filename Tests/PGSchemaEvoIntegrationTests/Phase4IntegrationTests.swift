@@ -218,7 +218,7 @@ struct Phase4IntegrationTests {
         // Verify with fresh connection
         let vc = try await IntegrationTestConfig.connect(to: targetConfig)
         let rows = try await vc.query(
-            "SELECT count(*) FROM \(Self.testSchema).products",
+            PostgresQuery(unsafeSQL: "SELECT count(*) FROM \(Self.testSchema).products"),
             logger: IntegrationTestConfig.logger
         )
         for try await row in rows {
@@ -287,7 +287,7 @@ struct Phase4IntegrationTests {
 
         let vc = try await IntegrationTestConfig.connect(to: targetConfig)
         let rows = try await vc.query(
-            "SELECT count(*) FROM \(Self.testSchema).products",
+            PostgresQuery(unsafeSQL: "SELECT count(*) FROM \(Self.testSchema).products"),
             logger: IntegrationTestConfig.logger
         )
         for try await row in rows {
