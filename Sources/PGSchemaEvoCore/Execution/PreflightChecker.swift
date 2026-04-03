@@ -46,21 +46,24 @@ public struct PreflightChecker: Sendable {
         logger.info("Pre-flight: verifying objects exist in source...")
         do {
             let conn = try await PostgresConnectionHelper.connect(config: job.source, logger: logger)
-            let introspector = PGCatalogIntrospector(connection: conn, logger: logger)
+            do {
+                let introspector = PGCatalogIntrospector(connection: conn, logger: logger)
 
-            let allSourceObjects = try await introspector.listObjects(schema: nil, types: nil)
-            let sourceSet = Set(allSourceObjects)
+                let allSourceObjects = try await introspector.listObjects(schema: nil, types: nil)
+                let sourceSet = Set(allSourceObjects)
 
-            for spec in job.objects {
-                if !sourceSet.contains(spec.id) {
-                    // Try a more targeted check — listObjects may not cover all types
-                    let found = try await verifyObjectExists(spec.id, introspector: introspector)
-                    if !found {
-                        failures.append("Object not found in source: \(spec.id)")
+                for spec in job.objects {
+                    if !sourceSet.contains(spec.id) {
+                        // Try a more targeted check — listObjects may not cover all types
+                        let found = try await verifyObjectExists(spec.id, introspector: introspector)
+                        if !found {
+                            failures.append("Object not found in source: \(spec.id)")
+                        }
                     }
                 }
+            } catch {
+                failures.append("Failed to verify source objects: \(error.localizedDescription)")
             }
-
             try? await conn.close()
         } catch {
             failures.append("Failed to verify source objects: \(error.localizedDescription)")
@@ -71,17 +74,20 @@ public struct PreflightChecker: Sendable {
             logger.info("Pre-flight: checking for conflicts on target...")
             do {
                 let conn = try await PostgresConnectionHelper.connect(config: job.target, logger: logger)
-                let introspector = PGCatalogIntrospector(connection: conn, logger: logger)
+                do {
+                    let introspector = PGCatalogIntrospector(connection: conn, logger: logger)
 
-                let allTargetObjects = try await introspector.listObjects(schema: nil, types: nil)
-                let targetSet = Set(allTargetObjects)
+                    let allTargetObjects = try await introspector.listObjects(schema: nil, types: nil)
+                    let targetSet = Set(allTargetObjects)
 
-                for spec in job.objects {
-                    if targetSet.contains(spec.id) {
-                        failures.append("Object already exists on target: \(spec.id) (use --drop-existing to overwrite)")
+                    for spec in job.objects {
+                        if targetSet.contains(spec.id) {
+                            failures.append("Object already exists on target: \(spec.id) (use --drop-existing to overwrite)")
+                        }
                     }
+                } catch {
+                    failures.append("Failed to check target objects: \(error.localizedDescription)")
                 }
-
                 try? await conn.close()
             } catch {
                 failures.append("Failed to check target objects: \(error.localizedDescription)")
