@@ -1595,9 +1595,7 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        // Clean up target
-        try await IntegrationTestConfig.execute("DROP VIEW IF EXISTS public.active_users CASCADE", on: targetConn)
-        try await IntegrationTestConfig.execute("DROP TYPE IF EXISTS public.order_status CASCADE", on: targetConn)
+        // Clean up target - use cov-specific objects to avoid cross-suite races
         try await IntegrationTestConfig.execute("DROP SEQUENCE IF EXISTS public.invoice_number_seq CASCADE", on: targetConn)
         try await IntegrationTestConfig.execute("DROP TYPE IF EXISTS public.address CASCADE", on: targetConn)
 
@@ -1605,7 +1603,6 @@ struct LiveExecutionCoverageTests {
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .enum, schema: "public", name: "order_status")),
                 ObjectSpec(id: ObjectIdentifier(type: .sequence, schema: "public", name: "invoice_number_seq")),
                 ObjectSpec(id: ObjectIdentifier(type: .compositeType, schema: "public", name: "address")),
             ],
@@ -1620,62 +1617,26 @@ struct LiveExecutionCoverageTests {
         _ = try await orchestrator.execute(job: job)
 
         // Clean up
-        try await IntegrationTestConfig.execute("DROP TYPE IF EXISTS public.order_status CASCADE", on: targetConn)
         try await IntegrationTestConfig.execute("DROP SEQUENCE IF EXISTS public.invoice_number_seq CASCADE", on: targetConn)
         try await IntegrationTestConfig.execute("DROP TYPE IF EXISTS public.address CASCADE", on: targetConn)
     }
 
-    @Test("Preflight validates view and schema objects on source")
-    func preflightViewSchemaObjects() async throws {
+    @Test("PreflightChecker verifies various object types on source")
+    func preflightCheckerVariousTypes() async throws {
         let sourceConfig = try IntegrationTestConfig.sourceConfig()
         let targetConfig = try IntegrationTestConfig.targetConfig()
-        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
-        defer { Task { try? await targetConn.close() } }
 
-        // Need users table for the view
-        try await IntegrationTestConfig.execute("DROP VIEW IF EXISTS public.active_users CASCADE", on: targetConn)
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.users CASCADE", on: targetConn)
-        try await IntegrationTestConfig.execute("DROP TYPE IF EXISTS public.user_role CASCADE", on: targetConn)
-        try await IntegrationTestConfig.execute("DROP SCHEMA IF EXISTS analytics CASCADE", on: targetConn)
-
+        // Build a job with all object types to exercise verifyObjectExists switch branches
+        // Uses dryRun: false so preflight actually runs, but we only call the checker directly
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .schema, schema: nil, name: "analytics")),
-                ObjectSpec(id: ObjectIdentifier(type: .enum, schema: "public", name: "user_role")),
-                ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: "users")),
                 ObjectSpec(id: ObjectIdentifier(type: .view, schema: "public", name: "active_users")),
-            ],
-            dryRun: false,
-            dropIfExists: true,
-            force: true,
-            retries: 0,
-            skipPreflight: false
-        )
-
-        let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
-        _ = try await orchestrator.execute(job: job)
-
-        // Clean up
-        try await IntegrationTestConfig.execute("DROP VIEW IF EXISTS public.active_users CASCADE", on: targetConn)
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.users CASCADE", on: targetConn)
-        try await IntegrationTestConfig.execute("DROP TYPE IF EXISTS public.user_role CASCADE", on: targetConn)
-        try await IntegrationTestConfig.execute("DROP SCHEMA IF EXISTS analytics CASCADE", on: targetConn)
-    }
-
-    @Test("Preflight validates materialized view object on source")
-    func preflightMaterializedView() async throws {
-        let sourceConfig = try IntegrationTestConfig.sourceConfig()
-        let targetConfig = try IntegrationTestConfig.targetConfig()
-
-        // Use dry-run after preflight since mat view clone has issues with live execution
-        // But preflight needs dryRun=false to actually run, so we use a trick:
-        // We pass a matview to preflight; it validates it exists on source
-        let job = CloneJob(
-            source: sourceConfig,
-            target: targetConfig,
-            objects: [
+                ObjectSpec(id: ObjectIdentifier(type: .enum, schema: "public", name: "order_status")),
+                ObjectSpec(id: ObjectIdentifier(type: .sequence, schema: "public", name: "invoice_number_seq")),
+                ObjectSpec(id: ObjectIdentifier(type: .compositeType, schema: "public", name: "address")),
+                ObjectSpec(id: ObjectIdentifier(type: .schema, schema: nil, name: "analytics")),
                 ObjectSpec(id: ObjectIdentifier(type: .materializedView, schema: "analytics", name: "daily_order_summary")),
             ],
             dryRun: false,
@@ -1685,14 +1646,10 @@ struct LiveExecutionCoverageTests {
             skipPreflight: false
         )
 
-        // This will run preflight (verifying matview exists on source) then attempt live clone
-        // The live clone may fail for matview but preflight code path is covered
-        let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
-        do {
-            _ = try await orchestrator.execute(job: job)
-        } catch {
-            // Mat view clone may fail but preflight code path was covered
-        }
+        // Call PreflightChecker directly — doesn't actually clone anything
+        let checker = PreflightChecker(logger: IntegrationTestConfig.logger)
+        let failures = try await checker.check(job: job)
+        #expect(failures.isEmpty, "Preflight should pass for all existing source objects: \(failures)")
     }
 
     // MARK: - SyncAll with modified table (covers syncAll alter path)

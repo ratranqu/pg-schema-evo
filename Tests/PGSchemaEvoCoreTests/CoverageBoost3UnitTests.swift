@@ -503,3 +503,106 @@ struct SyncJobExtraTests {
         #expect(!job.force)
     }
 }
+
+// MARK: - MigrationFileManager coverage
+
+@Suite("MigrationFileManager Extra Tests")
+struct MigrationFileManagerExtraTests {
+
+    @Test("Write and read migration with irreversible changes")
+    func writeReadIrreversibleChanges() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("mfm_test_\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
+
+        let fm = MigrationFileManager(directory: tmpDir)
+        let migration = Migration(
+            id: "20260403_test_irrev",
+            description: "Test irreversible",
+            generatedAt: "2026-04-03T00:00:00Z",
+            checksum: "abc123",
+            objectsAffected: ["table:public.users"],
+            irreversibleChanges: ["Cannot remove enum value 'old_status'"],
+            version: 1
+        )
+        let sql = MigrationSQL(
+            upSQL: "ALTER TYPE public.order_status ADD VALUE 'new_status';",
+            downSQL: ""
+        )
+
+        try fm.write(migration: migration, sql: sql)
+        let (readMigration, readSQL) = try fm.read(id: migration.id)
+
+        #expect(readMigration.id == migration.id)
+        #expect(readMigration.irreversibleChanges == ["Cannot remove enum value 'old_status'"])
+        #expect(readSQL.upSQL.contains("ADD VALUE"))
+    }
+
+    @Test("List migrations returns sorted IDs")
+    func listMigrationsSorted() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("mfm_list_\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
+
+        let fm = MigrationFileManager(directory: tmpDir)
+
+        // Write two migrations out of order
+        for id in ["20260403_second", "20260402_first"] {
+            let m = Migration(id: id, description: "test", generatedAt: "", checksum: "x")
+            let s = MigrationSQL(upSQL: "SELECT 1;", downSQL: "")
+            try fm.write(migration: m, sql: s)
+        }
+
+        let ids = try fm.listMigrations()
+        #expect(ids == ["20260402_first", "20260403_second"])
+    }
+
+    @Test("List migrations on empty directory returns empty")
+    func listMigrationsEmpty() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("mfm_empty_\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
+
+        let fm = MigrationFileManager(directory: tmpDir)
+        let ids = try fm.listMigrations()
+        #expect(ids.isEmpty)
+    }
+}
+
+// MARK: - MigrationApplicator empty directory coverage
+
+@Suite("MigrationApplicator Unit Tests")
+struct MigrationApplicatorUnitTests {
+
+    @Test("Apply with empty migration directory returns empty")
+    func applyEmptyDirectory() async throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("mig_empty_\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
+
+        let config = MigrationConfig(directory: tmpDir)
+        let applicator = MigrationApplicator(config: config, logger: Logger(label: "test"))
+
+        // This should hit lines 34-35 (no migration files found)
+        let applied = try await applicator.apply(
+            targetDSN: "postgresql://testuser:testpass@localhost:15432/source_db"
+        )
+        #expect(applied.isEmpty)
+    }
+
+    @Test("Rollback with no applied migrations returns empty")
+    func rollbackNoApplied() async throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("mig_rollback_\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
+
+        let config = MigrationConfig(directory: tmpDir)
+        let applicator = MigrationApplicator(config: config, logger: Logger(label: "test"))
+
+        // This should hit lines 145-147 (no applied migrations to rollback)
+        let rolledBack = try await applicator.rollback(
+            targetDSN: "postgresql://testuser:testpass@localhost:15432/source_db"
+        )
+        #expect(rolledBack.isEmpty)
+    }
+}
