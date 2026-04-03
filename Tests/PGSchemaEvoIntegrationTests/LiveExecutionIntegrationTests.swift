@@ -157,6 +157,7 @@ struct LiveExecutionIntegrationTests {
                 ),
             ],
             dryRun: false,
+            dropIfExists: true,
             force: true,
             retries: 0,
             skipPreflight: true

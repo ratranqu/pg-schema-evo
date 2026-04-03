@@ -449,11 +449,11 @@ struct OrchestratorIntegrationTests {
 
         // Run 5 queries concurrently (pool size 3, so some will queue)
         try await withThrowingTaskGroup(of: Int.self) { group in
-            for i in 0..<5 {
+            for _ in 0..<5 {
                 group.addTask {
                     try await pool.withConnection { conn in
                         let rows = try await conn.query(
-                            PostgresQuery(unsafeSQL: "SELECT \(i) as val"),
+                            "SELECT 1 as val",
                             logger: IntegrationTestConfig.logger
                         )
                         var val = 0
