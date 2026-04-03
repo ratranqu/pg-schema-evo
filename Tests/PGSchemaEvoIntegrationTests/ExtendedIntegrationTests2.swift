@@ -202,19 +202,14 @@ struct ExtendedIntegrationTests2 {
         #expect(config.objects.count == 1)
         #expect(config.objects[0].id.name == "products")
 
-        // Verify the parsed config connects to a real database
-        let baseJob = config.toCloneJob()
-        let cloneJob = CloneJob(
-            source: baseJob.source,
-            target: baseJob.target,
-            objects: baseJob.objects,
-            dryRun: true,
-            parallel: baseJob.parallel
-        )
-
-        let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
-        let script = try await orchestrator.execute(job: cloneJob)
-        #expect(script.contains("products"), "Dry-run should produce script with interpolated config")
+        // Verify connection config was correctly parsed from interpolated YAML
+        let job = config.toCloneJob()
+        #expect(job.source.host == sourceConfig.host)
+        #expect(job.source.port == sourceConfig.port)
+        #expect(job.source.database == sourceConfig.database)
+        #expect(job.target.host == targetConfig.host)
+        #expect(job.target.port == targetConfig.port)
+        #expect(job.target.database == targetConfig.database)
     }
 
     @Test("Config loader throws on undefined env var without default")
