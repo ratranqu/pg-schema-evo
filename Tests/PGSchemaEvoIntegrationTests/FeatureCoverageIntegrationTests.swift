@@ -14,6 +14,15 @@ import Logging
 @Suite("Feature Coverage Integration Tests", .serialized)
 struct FeatureCoverageIntegrationTests {
 
+    /// Dedicated schema for test-specific tables to avoid cross-suite race conditions.
+    /// Other suites scan `public` tables, so ephemeral tables there cause objectNotFound races.
+    static let testSchema = "fc_test"
+
+    /// Ensure the dedicated test schema exists on a connection.
+    static func ensureTestSchema(on connection: PostgresConnection) async throws {
+        try await IntegrationTestConfig.execute("CREATE SCHEMA IF NOT EXISTS \(testSchema)", on: connection)
+    }
+
     // MARK: - 1. Materialized View Sync & Diff
 
     @Test("Sync creates missing materialized view on target")
@@ -184,12 +193,15 @@ struct FeatureCoverageIntegrationTests {
         let sourceEnv = sourceConfig.environment()
         let targetEnv = targetConfig.environment()
 
-        let tableName = "fc_e2e_sync_test"
+        let schema = Self.testSchema
+        let tableName = "e2e_sync_test"
+        let qualifiedName = "\(schema).\(tableName)"
 
-        // Step 1: Create identical tables on source and target
+        // Step 1: Create schema and identical tables on source and target
         let ddl = """
-            DROP TABLE IF EXISTS public.\(tableName) CASCADE;
-            CREATE TABLE public.\(tableName) (
+            CREATE SCHEMA IF NOT EXISTS \(schema);
+            DROP TABLE IF EXISTS \(qualifiedName) CASCADE;
+            CREATE TABLE \(qualifiedName) (
                 id integer PRIMARY KEY,
                 name text NOT NULL,
                 amount numeric(10,2) NOT NULL DEFAULT 0,
@@ -201,7 +213,7 @@ struct FeatureCoverageIntegrationTests {
 
         // Step 2: Insert initial data on both source and target
         let initialData = """
-            INSERT INTO public.\(tableName) (id, name, amount, updated_at) VALUES
+            INSERT INTO \(qualifiedName) (id, name, amount, updated_at) VALUES
                 (1, 'Alice', 100.00, '2026-01-01 00:00:00+00'),
                 (2, 'Bob', 200.00, '2026-01-02 00:00:00+00');
             """
@@ -215,7 +227,7 @@ struct FeatureCoverageIntegrationTests {
             target: targetConfig,
             tables: [
                 DataSyncTableConfig(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: tableName),
+                    id: ObjectIdentifier(type: .table, schema: schema, name: tableName),
                     trackingColumn: "updated_at"
                 ),
             ],
@@ -229,14 +241,14 @@ struct FeatureCoverageIntegrationTests {
         // Verify state was captured
         let stateStore = DataSyncStateStore()
         let state = try stateStore.load(path: stateFile)
-        #expect(state.tables["public.\(tableName)"] != nil, "State should track the table")
+        #expect(state.tables[qualifiedName] != nil, "State should track the table")
 
         // Step 4: Make changes on source — update a row and insert a new one
         _ = try await shell.run(
             command: psqlPath,
             arguments: [sourceDSN, "-c", """
-                UPDATE public.\(tableName) SET name = 'Alice Updated', amount = 150.00, updated_at = '2026-03-01 00:00:00+00' WHERE id = 1;
-                INSERT INTO public.\(tableName) (id, name, amount, updated_at) VALUES (3, 'Charlie', 300.00, '2026-03-01 00:00:00+00');
+                UPDATE \(qualifiedName) SET name = 'Alice Updated', amount = 150.00, updated_at = '2026-03-01 00:00:00+00' WHERE id = 1;
+                INSERT INTO \(qualifiedName) (id, name, amount, updated_at) VALUES (3, 'Charlie', 300.00, '2026-03-01 00:00:00+00');
                 """],
             environment: sourceEnv
         )
@@ -255,7 +267,7 @@ struct FeatureCoverageIntegrationTests {
         // Step 6: Verify target has the updates
         let verifyResult = try await shell.run(
             command: psqlPath,
-            arguments: [targetDSN, "-t", "-A", "-c", "SELECT id, name, amount FROM public.\(tableName) ORDER BY id;"],
+            arguments: [targetDSN, "-t", "-A", "-c", "SELECT id, name, amount FROM \(qualifiedName) ORDER BY id;"],
             environment: targetEnv
         )
         let lines = verifyResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n")
@@ -265,8 +277,8 @@ struct FeatureCoverageIntegrationTests {
         #expect(lines[2].contains("Charlie"), "Row 3 (new) should be synced")
 
         // Cleanup
-        _ = try await shell.run(command: psqlPath, arguments: [sourceDSN, "-c", "DROP TABLE IF EXISTS public.\(tableName) CASCADE;"], environment: sourceEnv)
-        _ = try await shell.run(command: psqlPath, arguments: [targetDSN, "-c", "DROP TABLE IF EXISTS public.\(tableName) CASCADE;"], environment: targetEnv)
+        _ = try await shell.run(command: psqlPath, arguments: [sourceDSN, "-c", "DROP TABLE IF EXISTS \(qualifiedName) CASCADE;"], environment: sourceEnv)
+        _ = try await shell.run(command: psqlPath, arguments: [targetDSN, "-c", "DROP TABLE IF EXISTS \(qualifiedName) CASCADE;"], environment: targetEnv)
     }
 
     // MARK: - 4. Clone with Retry
@@ -497,13 +509,19 @@ struct FeatureCoverageIntegrationTests {
             Task { try? await targetConn.close() }
         }
 
-        // Use a test-specific table to avoid cross-suite race on shared tables
-        let tableName = "fc_diff_migration_test"
+        // Use dedicated schema to avoid cross-suite race on public tables
+        let schema = Self.testSchema
+        let tableName = "diff_migration_test"
+        let qualifiedName = "\(schema).\(tableName)"
+
+        // Ensure schema exists
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await Self.ensureTestSchema(on: targetConn)
 
         // Create table with extra column on source
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(tableName) CASCADE", on: sourceConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(qualifiedName) CASCADE", on: sourceConn)
         try await IntegrationTestConfig.execute("""
-            CREATE TABLE public.\(tableName) (
+            CREATE TABLE \(qualifiedName) (
                 id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                 name text NOT NULL,
                 description text,
@@ -512,9 +530,9 @@ struct FeatureCoverageIntegrationTests {
             """, on: sourceConn)
 
         // Create same table on target but with fewer columns
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(tableName) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(qualifiedName) CASCADE", on: targetConn)
         try await IntegrationTestConfig.execute("""
-            CREATE TABLE public.\(tableName) (
+            CREATE TABLE \(qualifiedName) (
                 id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                 name text NOT NULL
             )
@@ -524,7 +542,7 @@ struct FeatureCoverageIntegrationTests {
         let targetIntrospector = PGCatalogIntrospector(connection: targetConn, logger: IntegrationTestConfig.logger)
         let differ = SchemaDiffer(logger: IntegrationTestConfig.logger)
 
-        let tableId = ObjectIdentifier(type: .table, schema: "public", name: tableName)
+        let tableId = ObjectIdentifier(type: .table, schema: schema, name: tableName)
         let objDiff = try await differ.compareObjects(tableId, source: sourceIntrospector, target: targetIntrospector)
 
         #expect(objDiff != nil, "Should detect column differences in table")
@@ -535,7 +553,7 @@ struct FeatureCoverageIntegrationTests {
         }
 
         // Cleanup
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(tableName) CASCADE", on: sourceConn)
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(tableName) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(qualifiedName) CASCADE", on: sourceConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(qualifiedName) CASCADE", on: targetConn)
     }
 }

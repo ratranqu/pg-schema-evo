@@ -10,19 +10,36 @@ import Logging
 @Suite("Live Execution Coverage Tests", .serialized)
 struct LiveExecutionCoverageTests {
 
+    /// Dedicated schema for test tables to avoid cross-suite race conditions.
+    /// Other suites scan `public` tables, so ephemeral tables there cause objectNotFound races.
+    static let testSchema = "cov_test"
     /// Table name unique to this suite to avoid cross-suite race conditions.
     static let testTable = "cov_items"
     /// Second table for multi-table parallel tests.
     static let testTable2 = "cov_widgets"
 
-    /// Set up the test tables on the source database.
+    /// Ensure the dedicated test schema exists on the given connection.
+    static func ensureSchema(on connection: PostgresConnection) async throws {
+        try await IntegrationTestConfig.execute("CREATE SCHEMA IF NOT EXISTS \(testSchema)", on: connection)
+    }
+
+    /// Set up the test tables on the source database and ensure schema on target.
     static func ensureSourceTables() async throws {
         let sourceConfig = try IntegrationTestConfig.sourceConfig()
         let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
         defer { Task { try? await sourceConn.close() } }
 
+        // Create dedicated schema on source
+        try await ensureSchema(on: sourceConn)
+
+        // Also ensure schema on target for DROP/clone operations
+        let targetConfig = try IntegrationTestConfig.targetConfig()
+        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
+        try await ensureSchema(on: targetConn)
+        try? await targetConn.close()
+
         try await IntegrationTestConfig.execute("""
-            CREATE TABLE IF NOT EXISTS public.\(testTable) (
+            CREATE TABLE IF NOT EXISTS \(testSchema).\(testTable) (
                 id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                 name text NOT NULL,
                 value numeric(10, 2) NOT NULL DEFAULT 0,
@@ -31,7 +48,7 @@ struct LiveExecutionCoverageTests {
             """, on: sourceConn)
 
         try await IntegrationTestConfig.execute("""
-            CREATE TABLE IF NOT EXISTS public.\(testTable2) (
+            CREATE TABLE IF NOT EXISTS \(testSchema).\(testTable2) (
                 id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                 label text NOT NULL,
                 score integer NOT NULL DEFAULT 0
@@ -40,28 +57,28 @@ struct LiveExecutionCoverageTests {
 
         // Insert data if empty
         let rows1 = try await sourceConn.query(
-            PostgresQuery(unsafeSQL: "SELECT count(*) FROM public.\(testTable)"),
+            PostgresQuery(unsafeSQL: "SELECT count(*) FROM \(testSchema).\(testTable)"),
             logger: IntegrationTestConfig.logger
         )
         var count1: Int64 = 0
         for try await row in rows1 { count1 = try row.decode(Int64.self) }
         if count1 == 0 {
             try await IntegrationTestConfig.execute("""
-                INSERT INTO public.\(testTable) (name, value) VALUES
+                INSERT INTO \(testSchema).\(testTable) (name, value) VALUES
                 ('alpha', 10.00), ('beta', 20.00), ('gamma', 30.00),
                 ('delta', 40.00), ('epsilon', 50.00)
                 """, on: sourceConn)
         }
 
         let rows2 = try await sourceConn.query(
-            PostgresQuery(unsafeSQL: "SELECT count(*) FROM public.\(testTable2)"),
+            PostgresQuery(unsafeSQL: "SELECT count(*) FROM \(testSchema).\(testTable2)"),
             logger: IntegrationTestConfig.logger
         )
         var count2: Int64 = 0
         for try await row in rows2 { count2 = try row.decode(Int64.self) }
         if count2 == 0 {
             try await IntegrationTestConfig.execute("""
-                INSERT INTO public.\(testTable2) (label, score) VALUES
+                INSERT INTO \(testSchema).\(testTable2) (label, score) VALUES
                 ('w1', 10), ('w2', 20), ('w3', 30), ('w4', 40), ('w5', 50)
                 """, on: sourceConn)
         }
@@ -77,14 +94,14 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable),
+                    id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable),
                     copyData: true
                 ),
             ],
@@ -99,14 +116,14 @@ struct LiveExecutionCoverageTests {
         _ = try await orchestrator.execute(job: job)
 
         let rows = try await targetConn.query(
-            PostgresQuery(unsafeSQL: "SELECT count(*) FROM public.\(Self.testTable)"),
+            PostgresQuery(unsafeSQL: "SELECT count(*) FROM \(Self.testSchema).\(Self.testTable)"),
             logger: IntegrationTestConfig.logger
         )
         var count: Int64 = 0
         for try await row in rows { count = try row.decode(Int64.self) }
         #expect(count > 0)
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     @Test("Live clone table with data and WHERE clause")
@@ -117,14 +134,14 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable),
+                    id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable),
                     copyData: true,
                     whereClause: "value > 20"
                 ),
@@ -140,7 +157,7 @@ struct LiveExecutionCoverageTests {
         _ = try await orchestrator.execute(job: job)
 
         let rows = try await targetConn.query(
-            PostgresQuery(unsafeSQL: "SELECT count(*) FROM public.\(Self.testTable)"),
+            PostgresQuery(unsafeSQL: "SELECT count(*) FROM \(Self.testSchema).\(Self.testTable)"),
             logger: IntegrationTestConfig.logger
         )
         var count: Int64 = 0
@@ -148,7 +165,7 @@ struct LiveExecutionCoverageTests {
         #expect(count > 0)
         #expect(count < 5)  // Only rows with value > 20
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     @Test("Live clone table with row limit")
@@ -159,14 +176,14 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable),
+                    id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable),
                     copyData: true,
                     rowLimit: 2
                 ),
@@ -182,14 +199,14 @@ struct LiveExecutionCoverageTests {
         _ = try await orchestrator.execute(job: job)
 
         let rows = try await targetConn.query(
-            PostgresQuery(unsafeSQL: "SELECT count(*) FROM public.\(Self.testTable)"),
+            PostgresQuery(unsafeSQL: "SELECT count(*) FROM \(Self.testSchema).\(Self.testTable)"),
             logger: IntegrationTestConfig.logger
         )
         var count: Int64 = 0
         for try await row in rows { count = try row.decode(Int64.self) }
         #expect(count == 2)
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     @Test("Live clone table with pgDump data method")
@@ -200,14 +217,14 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable),
+                    id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable),
                     copyData: true
                 ),
             ],
@@ -223,14 +240,14 @@ struct LiveExecutionCoverageTests {
         _ = try await orchestrator.execute(job: job)
 
         let rows = try await targetConn.query(
-            PostgresQuery(unsafeSQL: "SELECT count(*) FROM public.\(Self.testTable)"),
+            PostgresQuery(unsafeSQL: "SELECT count(*) FROM \(Self.testSchema).\(Self.testTable)"),
             logger: IntegrationTestConfig.logger
         )
         var count: Int64 = 0
         for try await row in rows { count = try row.decode(Int64.self) }
         #expect(count > 0)
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     @Test("Live clone with dropIfExists and data")
@@ -242,15 +259,15 @@ struct LiveExecutionCoverageTests {
         defer { Task { try? await targetConn.close() } }
 
         // First create a dummy table so dropIfExists has something to drop
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
-        try await IntegrationTestConfig.execute("CREATE TABLE public.\(Self.testTable) (id int)", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("CREATE TABLE \(Self.testSchema).\(Self.testTable) (id int)", on: targetConn)
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable),
+                    id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable),
                     copyData: true
                 ),
             ],
@@ -265,14 +282,14 @@ struct LiveExecutionCoverageTests {
         _ = try await orchestrator.execute(job: job)
 
         let rows = try await targetConn.query(
-            PostgresQuery(unsafeSQL: "SELECT count(*) FROM public.\(Self.testTable)"),
+            PostgresQuery(unsafeSQL: "SELECT count(*) FROM \(Self.testSchema).\(Self.testTable)"),
             logger: IntegrationTestConfig.logger
         )
         var count: Int64 = 0
         for try await row in rows { count = try row.decode(Int64.self) }
         #expect(count > 0)
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     @Test("Live clone with permissions")
@@ -283,13 +300,13 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
 
         // Grant permissions on source table so there's something to copy
         let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
         defer { Task { try? await sourceConn.close() } }
         try await IntegrationTestConfig.execute("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_role') THEN CREATE ROLE app_role; END IF; END $$", on: sourceConn)
-        try await IntegrationTestConfig.execute("GRANT SELECT ON public.\(Self.testTable) TO app_role", on: sourceConn)
+        try await IntegrationTestConfig.execute("GRANT SELECT ON \(Self.testSchema).\(Self.testTable) TO app_role", on: sourceConn)
 
         // Also create role on target
         try await IntegrationTestConfig.execute("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_role') THEN CREATE ROLE app_role; END IF; END $$", on: targetConn)
@@ -299,7 +316,7 @@ struct LiveExecutionCoverageTests {
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable),
+                    id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable),
                     copyPermissions: true
                 ),
             ],
@@ -315,14 +332,14 @@ struct LiveExecutionCoverageTests {
 
         // Verify table exists
         let rows = try await targetConn.query(
-            PostgresQuery(unsafeSQL: "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = '\(Self.testTable)'"),
+            PostgresQuery(unsafeSQL: "SELECT 1 FROM information_schema.tables WHERE table_schema = '\(Self.testSchema)' AND table_name = '\(Self.testTable)'"),
             logger: IntegrationTestConfig.logger
         )
         var found = false
         for try await _ in rows { found = true }
         #expect(found)
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     @Test("Live clone with RLS policies")
@@ -378,14 +395,14 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable),
+                    id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable),
                     copyData: true
                 ),
             ],
@@ -401,14 +418,14 @@ struct LiveExecutionCoverageTests {
         _ = try await orchestrator.execute(job: job)
 
         let rows = try await targetConn.query(
-            PostgresQuery(unsafeSQL: "SELECT count(*) FROM public.\(Self.testTable)"),
+            PostgresQuery(unsafeSQL: "SELECT count(*) FROM \(Self.testSchema).\(Self.testTable)"),
             logger: IntegrationTestConfig.logger
         )
         var count: Int64 = 0
         for try await row in rows { count = try row.decode(Int64.self) }
         #expect(count > 0)
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     @Test("Live clone multiple tables with parallel data transfer")
@@ -419,19 +436,19 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable2) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable2) CASCADE", on: targetConn)
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable),
+                    id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable),
                     copyData: true
                 ),
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable2),
+                    id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable2),
                     copyData: true
                 ),
             ],
@@ -447,17 +464,17 @@ struct LiveExecutionCoverageTests {
         _ = try await orchestrator.execute(job: job)
 
         var count1: Int64 = 0
-        let r1 = try await targetConn.query(PostgresQuery(unsafeSQL: "SELECT count(*) FROM public.\(Self.testTable)"), logger: IntegrationTestConfig.logger)
+        let r1 = try await targetConn.query(PostgresQuery(unsafeSQL: "SELECT count(*) FROM \(Self.testSchema).\(Self.testTable)"), logger: IntegrationTestConfig.logger)
         for try await row in r1 { count1 = try row.decode(Int64.self) }
         #expect(count1 > 0)
 
         var count2: Int64 = 0
-        let r2 = try await targetConn.query(PostgresQuery(unsafeSQL: "SELECT count(*) FROM public.\(Self.testTable2)"), logger: IntegrationTestConfig.logger)
+        let r2 = try await targetConn.query(PostgresQuery(unsafeSQL: "SELECT count(*) FROM \(Self.testSchema).\(Self.testTable2)"), logger: IntegrationTestConfig.logger)
         for try await row in r2 { count2 = try row.decode(Int64.self) }
         #expect(count2 > 0)
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable2) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable2) CASCADE", on: targetConn)
     }
 
     // MARK: - SyncOrchestrator live execution
@@ -470,13 +487,13 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
 
         let job = SyncJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable)),
+                ObjectSpec(id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable)),
             ],
             dryRun: false,
             dropIfExists: true,
@@ -488,14 +505,14 @@ struct LiveExecutionCoverageTests {
         _ = try await orchestrator.execute(job: job)
 
         let rows = try await targetConn.query(
-            PostgresQuery(unsafeSQL: "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = '\(Self.testTable)'"),
+            PostgresQuery(unsafeSQL: "SELECT 1 FROM information_schema.tables WHERE table_schema = '\(Self.testSchema)' AND table_name = '\(Self.testTable)'"),
             logger: IntegrationTestConfig.logger
         )
         var found = false
         for try await _ in rows { found = true }
         #expect(found)
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     @Test("Live sync detects identical table")
@@ -506,14 +523,14 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
 
         // First clone the table to target
         let cloneJob = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable)),
+                ObjectSpec(id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable)),
             ],
             dryRun: false,
             dropIfExists: true,
@@ -529,7 +546,7 @@ struct LiveExecutionCoverageTests {
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable)),
+                ObjectSpec(id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable)),
             ],
             dryRun: false,
             force: true,
@@ -540,7 +557,7 @@ struct LiveExecutionCoverageTests {
         let result = try await syncOrch.execute(job: syncJob)
         #expect(result.contains("No changes") || result.contains("in sync") || result.contains("0 new"))
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     // MARK: - PreflightChecker coverage
@@ -553,13 +570,13 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable)),
+                ObjectSpec(id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable)),
             ],
             dryRun: false,
             force: true,
@@ -604,14 +621,14 @@ struct LiveExecutionCoverageTests {
         defer { Task { try? await targetConn.close() } }
 
         // Create a table on target to cause conflict
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
-        try await IntegrationTestConfig.execute("CREATE TABLE public.\(Self.testTable) (id int)", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("CREATE TABLE \(Self.testSchema).\(Self.testTable) (id int)", on: targetConn)
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable)),
+                ObjectSpec(id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable)),
             ],
             dryRun: false,
             dropIfExists: false,
@@ -625,7 +642,7 @@ struct LiveExecutionCoverageTests {
         #expect(!failures.isEmpty)
         #expect(failures.contains { $0.contains("already exists") })
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     @Test("Preflight checker with dry-run")
@@ -636,13 +653,13 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable)),
+                ObjectSpec(id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable)),
             ],
             dryRun: true,
             force: true,
@@ -709,14 +726,14 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable),
+                    id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable),
                     copyData: true
                 ),
             ],
@@ -732,14 +749,14 @@ struct LiveExecutionCoverageTests {
         _ = try await orchestrator.execute(job: job)
 
         let rows = try await targetConn.query(
-            PostgresQuery(unsafeSQL: "SELECT count(*) FROM public.\(Self.testTable)"),
+            PostgresQuery(unsafeSQL: "SELECT count(*) FROM \(Self.testSchema).\(Self.testTable)"),
             logger: IntegrationTestConfig.logger
         )
         var count: Int64 = 0
         for try await row in rows { count = try row.decode(Int64.self) }
         #expect(count == 1)
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     // MARK: - Sync with dropExtra
@@ -782,10 +799,10 @@ struct LiveExecutionCoverageTests {
         defer { Task { try? await targetConn.close() } }
 
         // Create a table on target that's slightly different from source
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
         // Create with fewer columns than source
         try await IntegrationTestConfig.execute("""
-            CREATE TABLE public.\(Self.testTable) (
+            CREATE TABLE \(Self.testSchema).\(Self.testTable) (
                 id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                 name text NOT NULL
             )
@@ -795,7 +812,7 @@ struct LiveExecutionCoverageTests {
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable)),
+                ObjectSpec(id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable)),
             ],
             dryRun: false,
             force: true,
@@ -806,7 +823,7 @@ struct LiveExecutionCoverageTests {
         // Exercises the modified-object code path
         _ = try await orchestrator.execute(job: job)
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     // MARK: - Clone with preflight (not skipped)
@@ -819,14 +836,14 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable),
+                    id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable),
                     copyData: true
                 ),
             ],
@@ -841,14 +858,14 @@ struct LiveExecutionCoverageTests {
         _ = try await orchestrator.execute(job: job)
 
         let rows = try await targetConn.query(
-            PostgresQuery(unsafeSQL: "SELECT count(*) FROM public.\(Self.testTable)"),
+            PostgresQuery(unsafeSQL: "SELECT count(*) FROM \(Self.testSchema).\(Self.testTable)"),
             logger: IntegrationTestConfig.logger
         )
         var count: Int64 = 0
         for try await row in rows { count = try row.decode(Int64.self) }
         #expect(count > 0)
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     // MARK: - Clone with retries
@@ -861,14 +878,14 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable)
+                    id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable)
                 ),
             ],
             dryRun: false,
@@ -882,14 +899,14 @@ struct LiveExecutionCoverageTests {
         _ = try await orchestrator.execute(job: job)
 
         let rows = try await targetConn.query(
-            PostgresQuery(unsafeSQL: "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = '\(Self.testTable)'"),
+            PostgresQuery(unsafeSQL: "SELECT 1 FROM information_schema.tables WHERE table_schema = '\(Self.testSchema)' AND table_name = '\(Self.testTable)'"),
             logger: IntegrationTestConfig.logger
         )
         var found = false
         for try await _ in rows { found = true }
         #expect(found)
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     // MARK: - Sync with syncAll
@@ -905,7 +922,7 @@ struct LiveExecutionCoverageTests {
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable)),
+                ObjectSpec(id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable)),
             ],
             dryRun: true,
             force: true,
@@ -1046,14 +1063,14 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable),
+                    id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable),
                     copyData: true
                 ),
             ],
@@ -1070,14 +1087,14 @@ struct LiveExecutionCoverageTests {
         _ = try await orchestrator.execute(job: job)
 
         let rows = try await targetConn.query(
-            PostgresQuery(unsafeSQL: "SELECT count(*) FROM public.\(Self.testTable)"),
+            PostgresQuery(unsafeSQL: "SELECT count(*) FROM \(Self.testSchema).\(Self.testTable)"),
             logger: IntegrationTestConfig.logger
         )
         var count: Int64 = 0
         for try await row in rows { count = try row.decode(Int64.self) }
         #expect(count > 0)
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     // MARK: - Clone with data and WHERE via parallel
@@ -1090,14 +1107,14 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable),
+                    id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable),
                     copyData: true,
                     whereClause: "value > 20"
                 ),
@@ -1114,14 +1131,14 @@ struct LiveExecutionCoverageTests {
         _ = try await orchestrator.execute(job: job)
 
         let rows = try await targetConn.query(
-            PostgresQuery(unsafeSQL: "SELECT count(*) FROM public.\(Self.testTable)"),
+            PostgresQuery(unsafeSQL: "SELECT count(*) FROM \(Self.testSchema).\(Self.testTable)"),
             logger: IntegrationTestConfig.logger
         )
         var count: Int64 = 0
         for try await row in rows { count = try row.decode(Int64.self) }
         #expect(count > 0)
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     // MARK: - PgDumpIntrospector coverage
@@ -1283,9 +1300,9 @@ struct LiveExecutionCoverageTests {
         defer { Task { try? await targetConn.close() } }
 
         // Create target table with different schema (missing column)
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
         try await IntegrationTestConfig.execute("""
-            CREATE TABLE public.\(Self.testTable) (
+            CREATE TABLE \(Self.testSchema).\(Self.testTable) (
                 id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                 name text NOT NULL
             )
@@ -1295,7 +1312,7 @@ struct LiveExecutionCoverageTests {
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable)),
+                ObjectSpec(id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable)),
             ],
             dryRun: false,
             force: true,
@@ -1307,14 +1324,14 @@ struct LiveExecutionCoverageTests {
 
         // Verify the column was added
         let rows = try await targetConn.query(
-            PostgresQuery(unsafeSQL: "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '\(Self.testTable)' AND column_name = 'value'"),
+            PostgresQuery(unsafeSQL: "SELECT column_name FROM information_schema.columns WHERE table_schema = '\(Self.testSchema)' AND table_name = '\(Self.testTable)' AND column_name = 'value'"),
             logger: IntegrationTestConfig.logger
         )
         var found = false
         for try await _ in rows { found = true }
         #expect(found)
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     @Test("Live sync with allowDropColumns drops extra target column")
@@ -1326,9 +1343,9 @@ struct LiveExecutionCoverageTests {
         defer { Task { try? await targetConn.close() } }
 
         // Create target table with an extra column not in source
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
         try await IntegrationTestConfig.execute("""
-            CREATE TABLE public.\(Self.testTable) (
+            CREATE TABLE \(Self.testSchema).\(Self.testTable) (
                 id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                 name text NOT NULL,
                 value numeric(10, 2) NOT NULL DEFAULT 0,
@@ -1341,7 +1358,7 @@ struct LiveExecutionCoverageTests {
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable)),
+                ObjectSpec(id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable)),
             ],
             dryRun: false,
             allowDropColumns: true,
@@ -1354,14 +1371,14 @@ struct LiveExecutionCoverageTests {
 
         // Verify the extra column was dropped
         let rows = try await targetConn.query(
-            PostgresQuery(unsafeSQL: "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '\(Self.testTable)' AND column_name = 'extra_col'"),
+            PostgresQuery(unsafeSQL: "SELECT column_name FROM information_schema.columns WHERE table_schema = '\(Self.testSchema)' AND table_name = '\(Self.testTable)' AND column_name = 'extra_col'"),
             logger: IntegrationTestConfig.logger
         )
         var found = false
         for try await _ in rows { found = true }
         #expect(!found, "extra_col should have been dropped")
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     @Test("Live sync with schema-only object (extension)")
@@ -1553,14 +1570,14 @@ struct LiveExecutionCoverageTests {
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
         defer { Task { try? await targetConn.close() } }
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
 
         let job = CloneJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable),
+                    id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable),
                     copyData: true,
                     rowLimit: 2
                 ),
@@ -1577,14 +1594,14 @@ struct LiveExecutionCoverageTests {
         _ = try await orchestrator.execute(job: job)
 
         let rows = try await targetConn.query(
-            PostgresQuery(unsafeSQL: "SELECT count(*) FROM public.\(Self.testTable)"),
+            PostgresQuery(unsafeSQL: "SELECT count(*) FROM \(Self.testSchema).\(Self.testTable)"),
             logger: IntegrationTestConfig.logger
         )
         var count: Int64 = 0
         for try await row in rows { count = try row.decode(Int64.self) }
         #expect(count == 2)
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     // MARK: - Preflight with various object types (covers verifyObjectExists switch branches)
@@ -1664,9 +1681,9 @@ struct LiveExecutionCoverageTests {
         defer { Task { try? await targetConn.close() } }
 
         // Create target table with missing column so differ detects it as modified
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
         try await IntegrationTestConfig.execute("""
-            CREATE TABLE public.\(Self.testTable) (
+            CREATE TABLE \(Self.testSchema).\(Self.testTable) (
                 id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                 name text NOT NULL
             )
@@ -1676,7 +1693,7 @@ struct LiveExecutionCoverageTests {
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable)),
+                ObjectSpec(id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable)),
             ],
             dryRun: true,
             dropIfExists: true,
@@ -1691,7 +1708,7 @@ struct LiveExecutionCoverageTests {
         // Verify script contains ALTER TABLE for the missing columns
         #expect(script.contains("ALTER TABLE"), "Script should contain ALTER TABLE for modified table")
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     @Test("SyncAll with allowDropColumns generates DROP COLUMN in dry-run")
@@ -1703,9 +1720,9 @@ struct LiveExecutionCoverageTests {
         defer { Task { try? await targetConn.close() } }
 
         // Create target table with extra column not in source
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
         try await IntegrationTestConfig.execute("""
-            CREATE TABLE public.\(Self.testTable) (
+            CREATE TABLE \(Self.testSchema).\(Self.testTable) (
                 id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                 name text NOT NULL,
                 value numeric(10, 2) NOT NULL DEFAULT 0,
@@ -1718,7 +1735,7 @@ struct LiveExecutionCoverageTests {
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable)),
+                ObjectSpec(id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable)),
             ],
             dryRun: true,
             allowDropColumns: true,
@@ -1733,7 +1750,7 @@ struct LiveExecutionCoverageTests {
         // Verify script contains DROP COLUMN for extra_col
         #expect(script.contains("DROP COLUMN") || script.contains("extra_col"), "Script should contain DROP COLUMN for extra column")
 
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     @Test("SyncAll without allowDropColumns skips destructive changes in dry-run")
@@ -1745,9 +1762,9 @@ struct LiveExecutionCoverageTests {
         defer { Task { try? await targetConn.close() } }
 
         // Create target table with extra column - allowDropColumns=false should skip
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
         try await IntegrationTestConfig.execute("""
-            CREATE TABLE public.\(Self.testTable) (
+            CREATE TABLE \(Self.testSchema).\(Self.testTable) (
                 id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                 name text NOT NULL,
                 value numeric(10, 2) NOT NULL DEFAULT 0,
@@ -1760,7 +1777,7 @@ struct LiveExecutionCoverageTests {
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: Self.testTable)),
+                ObjectSpec(id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: Self.testTable)),
             ],
             dryRun: true,
             allowDropColumns: false,
@@ -1774,7 +1791,7 @@ struct LiveExecutionCoverageTests {
 
         // With allowDropColumns=false, the warning path (line 93) is exercised
         // We just verify the sync completes without error
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(Self.testTable) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(Self.testTable) CASCADE", on: targetConn)
     }
 
     // MARK: - Clone partitioned table with parallel data
