@@ -202,7 +202,7 @@ llvm-cov report \
 | Metric | Value |
 |--------|-------|
 | Line coverage | **84.22%** (max 1% regression per PR) |
-| Test suites | 57 suites, 727+ tests (unit + integration) |
+| Test suites | 72 suites, 922+ tests (727 unit, 195 integration) |
 
 > Coverage is automatically updated in this README on each merge to main.
 
@@ -214,4 +214,4 @@ llvm-cov report \
 
 ## Status
 
-Version 0.5.0 — Schema migration and migration tracking: full `migrate` CLI command with `generate`, `apply`, `rollback`, and `status` subcommands. Migrations stored as paired YAML metadata + plain SQL files with UP/DOWN/CUSTOM/DATA sections. Reverse SQL generation for all object types (tables, views, functions, sequences, enums, composite types, schemas, roles, extensions). Checksum verification with force-apply option. Migration tracking via configurable PostgreSQL table. Irreversible change detection (e.g. enum value additions). 727 unit tests, 57 suites. Code coverage baseline: 84.17%.
+Version 0.5.0 — Schema migration and migration tracking: full `migrate` CLI command with `generate`, `apply`, `rollback`, and `status` subcommands. Migrations stored as paired YAML metadata + plain SQL files with UP/DOWN/CUSTOM/DATA sections. Reverse SQL generation for all object types (tables, views, functions, sequences, enums, composite types, schemas, roles, extensions). Checksum verification with force-apply option. Migration tracking via configurable PostgreSQL table. Irreversible change detection (e.g. enum value additions). 922+ tests across 72 suites (727 unit, 195 integration). Code coverage baseline: 84.22%.
