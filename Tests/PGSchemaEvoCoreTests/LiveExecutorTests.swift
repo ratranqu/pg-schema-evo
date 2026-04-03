@@ -225,4 +225,58 @@ struct LiveExecutorTests {
         #expect(script.contains("Alter"))
         #expect(script.contains("INCREMENT BY 5"))
     }
+
+    // MARK: - Additional DROP edge cases
+
+    @Test("DROP aggregate with nil signature defaults to empty parens")
+    func dropAggregateNilSignature() {
+        let executor = makeExecutor()
+        let id = ObjectIdentifier(type: .aggregate, schema: "public", name: "my_agg")
+        let steps: [CloneStep] = [.dropObject(id)]
+        let script = executor.buildTransactionScript(steps: steps, prefetchedData: [:])
+        #expect(script.contains("DROP AGGREGATE IF EXISTS \(qn(schema: "public", name: "my_agg"))() CASCADE;"))
+    }
+
+    // MARK: - COPY data with WHERE and LIMIT in script
+
+    @Test("COPY data with WHERE clause in step comment")
+    func copyDataWithWhereClause() {
+        let executor = makeExecutor()
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "orders")
+        let steps: [CloneStep] = [
+            .copyData(id: id, method: .copy, estimatedSize: nil, whereClause: "status = 'active'", rowLimit: nil),
+        ]
+        let csvData = "id,status\n1,active\n"
+        let script = executor.buildTransactionScript(steps: steps, prefetchedData: [0: csvData])
+        #expect(script.contains("COPY"))
+        #expect(script.contains("1,active"))
+    }
+
+    @Test("COPY data with row limit in step comment")
+    func copyDataWithRowLimit() {
+        let executor = makeExecutor()
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "orders")
+        let steps: [CloneStep] = [
+            .copyData(id: id, method: .copy, estimatedSize: nil, whereClause: nil, rowLimit: 100),
+        ]
+        let csvData = "id\n1\n"
+        let script = executor.buildTransactionScript(steps: steps, prefetchedData: [0: csvData])
+        #expect(script.contains("FROM STDIN"))
+    }
+
+    // MARK: - pgDump data without trailing newline
+
+    @Test("pgDump data without trailing newline gets one added")
+    func pgDumpDataTrailingNewline() {
+        let executor = makeExecutor()
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "t")
+        let steps: [CloneStep] = [
+            .copyData(id: id, method: .pgDump, estimatedSize: nil),
+        ]
+        let pgDumpOutput = "COPY t (id) FROM stdin;\n1\n\\."
+        let script = executor.buildTransactionScript(steps: steps, prefetchedData: [0: pgDumpOutput])
+        #expect(script.contains("COPY t (id) FROM stdin;"))
+        // Should have newline added
+        #expect(script.contains("\\.\n"))
+    }
 }

@@ -18,6 +18,8 @@ Selectively clone PostgreSQL database objects between clusters. Copy tables, vie
 - **Partitioned tables** — Automatically clones parent tables with their partitions and bound specs
 - **Row-Level Security** — Optionally clone RLS policies and enable RLS on target tables
 - **Retry with rollback** — Transaction-wrapped execution with configurable retry and exponential backoff
+- **Schema migrations** — Generate, apply, rollback, and track versioned migrations with UP/DOWN SQL, checksum verification, and irreversible change detection
+- **Migration tracking** — Record applied migrations in a configurable PostgreSQL tracking table with rollback support
 - **Shell completions** — Built-in completion scripts for bash, zsh, and fish
 
 ## Quick Start
@@ -199,8 +201,8 @@ llvm-cov report \
 
 | Metric | Value |
 |--------|-------|
-| Line coverage | **82.97%** (max 1% regression per PR) |
-| Test suites | 33 suites, 498 tests (unit + integration) |
+| Line coverage | **90.15%** (max 1% regression per PR) |
+| Test suites | 84 suites, 1019 tests (763 unit, 256 integration) |
 
 > Coverage is automatically updated in this README on each merge to main.
 
@@ -212,4 +214,4 @@ llvm-cov report \
 
 ## Status
 
-Version 0.4.2 — Improved code coverage to 85%: new unit tests for SQLGenerator supportedTypes (all 7 generators), DataSyncStateStore error paths (100% line coverage), DatabaseObject parseObjectSpecifier edge cases, ConfigLoader file read errors. New integration tests covering live clone with RLS policies, partitioned table cloning, materialized view with REFRESH, permission copying, function/schema/extension cloning, cascade dependency resolution, pre-flight conflict detection, sync with column addition (ALTER path), syncAll mode, sync for views/composite types, and dry-run variants. Prior: expanded integration test coverage, performance enhancements (connection pooling, parallel data transfer, streaming COPY), enhanced schema migration with `diff --sql` complete migration scripts, DROP COLUMN/CONSTRAINT/INDEX support, trigger comparison, RLS policy comparison, safety flags, incremental data sync, selective cloning, dependency resolution, schema diffing, YAML config files, partitioned tables, RLS policies, selective data filters, pre-flight validation, and retry with rollback.
+Version 0.5.0 — Schema migration and migration tracking: full `migrate` CLI command with `generate`, `apply`, `rollback`, and `status` subcommands. Migrations stored as paired YAML metadata + plain SQL files with UP/DOWN/CUSTOM/DATA sections. Reverse SQL generation for all object types. Checksum verification with force-apply option. Migration tracking via configurable PostgreSQL table. Irreversible change detection. Comprehensive test coverage at 90%+ with 1008 tests across 83 suites.

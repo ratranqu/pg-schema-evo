@@ -2,7 +2,7 @@ import Testing
 import Foundation
 @testable import PGSchemaEvoCore
 
-@Suite("SignalHandler Tests")
+@Suite("SignalHandler Tests", .serialized)
 struct SignalHandlerTests {
 
     @Test("Shared instance is a singleton")

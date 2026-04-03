@@ -52,7 +52,7 @@ struct ParallelDataTransferTests {
     }
 
     @Test func buildLevelsPartitionsParallel() throws {
-        let parent = ObjectIdentifier(type: .table, schema: "public", name: "orders")
+        let _ = ObjectIdentifier(type: .table, schema: "public", name: "orders")
         let child1 = ObjectIdentifier(type: .table, schema: "public", name: "orders_2024_q1")
         let child2 = ObjectIdentifier(type: .table, schema: "public", name: "orders_2024_q2")
         let child3 = ObjectIdentifier(type: .table, schema: "public", name: "orders_2024_q3")
@@ -128,6 +128,93 @@ struct ParallelDataTransferTests {
         let levels = transfer.buildLevels(tasks)
         #expect(levels.count == 1)
         #expect(levels[0].count == 1)
+    }
+
+    @Test func buildLevelsCircularDependencies() throws {
+        let idA = ObjectIdentifier(type: .table, schema: "public", name: "a")
+        let idB = ObjectIdentifier(type: .table, schema: "public", name: "b")
+        let idC = ObjectIdentifier(type: .table, schema: "public", name: "c")
+
+        let transfer = ParallelDataTransfer(
+            maxConcurrency: 4,
+            shell: ShellRunner(),
+            logger: .init(label: "test")
+        )
+
+        // A -> B -> C -> A (circular)
+        let tasks = [
+            DataTransferTask(id: idA, method: .copy, estimatedSize: nil, dependsOn: [idC]),
+            DataTransferTask(id: idB, method: .copy, estimatedSize: nil, dependsOn: [idA]),
+            DataTransferTask(id: idC, method: .copy, estimatedSize: nil, dependsOn: [idB]),
+        ]
+
+        let levels = transfer.buildLevels(tasks)
+        // All tasks have circular deps, so after first empty level detection,
+        // all remaining tasks are placed in one level
+        let totalTasks = levels.flatMap { $0 }.count
+        #expect(totalTasks == 3)
+        // The circular dep fallback puts all remaining into one level
+        #expect(levels.count == 1)
+        #expect(levels[0].count == 3)
+    }
+
+    @Test func buildLevelsPartialCircularDependencies() throws {
+        let idA = ObjectIdentifier(type: .table, schema: "public", name: "a")
+        let idB = ObjectIdentifier(type: .table, schema: "public", name: "b")
+        let idC = ObjectIdentifier(type: .table, schema: "public", name: "c")
+        let idD = ObjectIdentifier(type: .table, schema: "public", name: "d")
+
+        let transfer = ParallelDataTransfer(
+            maxConcurrency: 4,
+            shell: ShellRunner(),
+            logger: .init(label: "test")
+        )
+
+        // A has no deps; B and C are circular; D depends on A
+        let tasks = [
+            DataTransferTask(id: idA, method: .copy, estimatedSize: nil, dependsOn: []),
+            DataTransferTask(id: idD, method: .copy, estimatedSize: nil, dependsOn: [idA]),
+            DataTransferTask(id: idB, method: .copy, estimatedSize: nil, dependsOn: [idC]),
+            DataTransferTask(id: idC, method: .copy, estimatedSize: nil, dependsOn: [idB]),
+        ]
+
+        let levels = transfer.buildLevels(tasks)
+        // Level 0: A (no deps)
+        // Level 1: D (depends on A, now scheduled)
+        // Then B and C are circular → dumped into one level
+        #expect(levels.count == 3)
+        #expect(levels[0].count == 1) // A
+        #expect(levels[0][0].id == idA)
+        #expect(levels[1].count == 1) // D
+        #expect(levels[1][0].id == idD)
+        #expect(levels[2].count == 2) // B and C (circular fallback)
+    }
+
+    @Test func buildLevelsEmptyTransfers() throws {
+        let transfer = ParallelDataTransfer(
+            maxConcurrency: 4,
+            shell: ShellRunner(),
+            logger: .init(label: "test")
+        )
+
+        let levels = transfer.buildLevels([])
+        #expect(levels.isEmpty)
+    }
+
+    @Test func dataTransferTaskInitWithWhereAndLimit() {
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "orders")
+        let task = DataTransferTask(
+            id: id,
+            method: .pgDump,
+            estimatedSize: 5000,
+            whereClause: "status = 'active'",
+            rowLimit: 100,
+            dependsOn: []
+        )
+        #expect(task.whereClause == "status = 'active'")
+        #expect(task.rowLimit == 100)
+        #expect(task.method == .pgDump)
+        #expect(task.estimatedSize == 5000)
     }
 
     // MARK: - Auto Detect Concurrency

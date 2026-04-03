@@ -25,6 +25,7 @@ struct LiveExecutionIntegrationTests {
                 ),
             ],
             dryRun: false,
+            dropIfExists: true,
             force: true,
             retries: 0,
             skipPreflight: true
@@ -71,6 +72,7 @@ struct LiveExecutionIntegrationTests {
             ],
             dryRun: false,
             defaultDataMethod: .copy,
+            dropIfExists: true,
             force: true,
             retries: 0,
             skipPreflight: true
@@ -157,6 +159,7 @@ struct LiveExecutionIntegrationTests {
                 ),
             ],
             dryRun: false,
+            dropIfExists: true,
             force: true,
             retries: 0,
             skipPreflight: true
@@ -201,6 +204,7 @@ struct LiveExecutionIntegrationTests {
                 ObjectSpec(id: ObjectIdentifier(type: .view, schema: "public", name: "active_users")),
             ],
             dryRun: false,
+            dropIfExists: true,
             force: true,
             retries: 0,
             skipPreflight: true
@@ -243,6 +247,7 @@ struct LiveExecutionIntegrationTests {
                 ),
             ],
             dryRun: false,
+            dropIfExists: true,
             force: true,
             retries: 0,
             skipPreflight: true
@@ -282,6 +287,7 @@ struct LiveExecutionIntegrationTests {
                 ),
             ],
             dryRun: false,
+            dropIfExists: true,
             force: true,
             retries: 0,
             skipPreflight: true
