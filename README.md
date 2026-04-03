@@ -210,6 +210,7 @@ llvm-cov report \
 
 - [Getting Started Guide](docs/getting-started.md)
 - [Architecture](docs/architecture.md)
+- [Integration Test Coverage](docs/integration-test-coverage.md)
 - [Detailed Architecture](ARCHITECTURE.md)
 
 ## Status
