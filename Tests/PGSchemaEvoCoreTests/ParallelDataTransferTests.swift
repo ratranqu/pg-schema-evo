@@ -52,7 +52,7 @@ struct ParallelDataTransferTests {
     }
 
     @Test func buildLevelsPartitionsParallel() throws {
-        let parent = ObjectIdentifier(type: .table, schema: "public", name: "orders")
+        let _ = ObjectIdentifier(type: .table, schema: "public", name: "orders")
         let child1 = ObjectIdentifier(type: .table, schema: "public", name: "orders_2024_q1")
         let child2 = ObjectIdentifier(type: .table, schema: "public", name: "orders_2024_q2")
         let child3 = ObjectIdentifier(type: .table, schema: "public", name: "orders_2024_q3")

@@ -32,7 +32,7 @@ struct CoverageBoost2IntegrationTests {
         let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
         let objects = try await introspector.listObjects(schema: nil, types: [.extension])
 
-        #expect(objects.contains { $0.name == "plpgsql" && $0.type == .extension })
+        #expect(objects.contains { $0.name == "pg_trgm" && $0.type == .extension })
     }
 
     // MARK: - Introspector: listObjects for roles
