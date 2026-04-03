@@ -37,77 +37,85 @@ public struct MigrationApplicator: Sendable {
 
         // Connect to target and get applied migrations
         let conn = try await PostgresConnectionHelper.connect(config: targetConfig, logger: logger)
-        defer { Task { try? await conn.close() } }
 
-        try await store.ensureTable(on: conn)
-        let applied = try await store.listAppliedMigrations(on: conn)
-        let appliedIds = Set(applied.map(\.id))
+        do {
+            try await store.ensureTable(on: conn)
+            let applied = try await store.listAppliedMigrations(on: conn)
+            let appliedIds = Set(applied.map(\.id))
 
-        // Determine pending migrations
-        var pending = allIds.filter { !appliedIds.contains($0) }
-        if let count {
-            pending = Array(pending.prefix(count))
-        }
-
-        guard !pending.isEmpty else {
-            logger.info("No pending migrations")
-            return []
-        }
-
-        var appliedResult: [String] = []
-
-        for id in pending {
-            let (migration, sql) = try fileManager.read(id: id)
-
-            // Verify checksum
-            let checksumValid = try fileManager.verifyChecksum(migration: migration)
-            if !checksumValid && !force {
-                throw PGSchemaEvoError.migrationChecksumMismatch(
-                    id: id,
-                    expected: migration.checksum,
-                    actual: MigrationFileManager.checksum(
-                        try String(contentsOfFile: fileManager.sqlPath(for: id), encoding: .utf8)
-                    )
-                )
+            // Determine pending migrations
+            var pending = allIds.filter { !appliedIds.contains($0) }
+            if let count {
+                pending = Array(pending.prefix(count))
             }
 
-            let fullSQL = sql.fullUpSQL
-            if fullSQL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                logger.warning("Migration \(id) has empty UP SQL, skipping")
-                continue
+            guard !pending.isEmpty else {
+                logger.info("No pending migrations")
+                try await conn.close()
+                return []
             }
 
-            if dryRun {
-                logger.info("Would apply migration: \(id)")
-                print("-- Migration: \(id)")
-                print("BEGIN;")
-                print(fullSQL)
-                print("COMMIT;")
-                print("")
-            } else {
-                logger.info("Applying migration: \(id)")
-                let shell = ShellRunner()
-                let script = "BEGIN;\n\(fullSQL)\nCOMMIT;"
-                let result = try await shell.run(
-                    command: "/usr/bin/env",
-                    arguments: ["psql"] + targetConfig.psqlArgs() + ["-v", "ON_ERROR_STOP=1"],
-                    environment: targetConfig.environment(),
-                    input: script
-                )
-                if result.exitCode != 0 {
-                    throw PGSchemaEvoError.shellCommandFailed(
-                        command: "psql (migration \(id))",
-                        exitCode: result.exitCode,
-                        stderr: result.stderr
+            var appliedResult: [String] = []
+
+            for id in pending {
+                let (migration, sql) = try fileManager.read(id: id)
+
+                // Verify checksum
+                let checksumValid = try fileManager.verifyChecksum(migration: migration)
+                if !checksumValid && !force {
+                    try await conn.close()
+                    throw PGSchemaEvoError.migrationChecksumMismatch(
+                        id: id,
+                        expected: migration.checksum,
+                        actual: MigrationFileManager.checksum(
+                            try String(contentsOfFile: fileManager.sqlPath(for: id), encoding: .utf8)
+                        )
                     )
                 }
-                try await store.record(migration: migration, on: conn)
+
+                let fullSQL = sql.fullUpSQL
+                if fullSQL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    logger.warning("Migration \(id) has empty UP SQL, skipping")
+                    continue
+                }
+
+                if dryRun {
+                    logger.info("Would apply migration: \(id)")
+                    print("-- Migration: \(id)")
+                    print("BEGIN;")
+                    print(fullSQL)
+                    print("COMMIT;")
+                    print("")
+                } else {
+                    logger.info("Applying migration: \(id)")
+                    let shell = ShellRunner()
+                    let script = "BEGIN;\n\(fullSQL)\nCOMMIT;"
+                    let result = try await shell.run(
+                        command: "/usr/bin/env",
+                        arguments: ["psql"] + targetConfig.psqlArgs() + ["-v", "ON_ERROR_STOP=1"],
+                        environment: targetConfig.environment(),
+                        input: script
+                    )
+                    if result.exitCode != 0 {
+                        try await conn.close()
+                        throw PGSchemaEvoError.shellCommandFailed(
+                            command: "psql (migration \(id))",
+                            exitCode: result.exitCode,
+                            stderr: result.stderr
+                        )
+                    }
+                    try await store.record(migration: migration, on: conn)
+                }
+
+                appliedResult.append(id)
             }
 
-            appliedResult.append(id)
+            try await conn.close()
+            return appliedResult
+        } catch {
+            try? await conn.close()
+            throw error
         }
-
-        return appliedResult
     }
 
     /// Rollback the last N applied migrations.
@@ -128,74 +136,82 @@ public struct MigrationApplicator: Sendable {
         let store = MigrationStore(config: config, logger: logger)
 
         let conn = try await PostgresConnectionHelper.connect(config: targetConfig, logger: logger)
-        defer { Task { try? await conn.close() } }
 
-        try await store.ensureTable(on: conn)
-        let applied = try await store.listAppliedMigrations(on: conn)
+        do {
+            try await store.ensureTable(on: conn)
+            let applied = try await store.listAppliedMigrations(on: conn)
 
-        guard !applied.isEmpty else {
-            logger.info("No applied migrations to rollback")
-            return []
-        }
-
-        // Rollback in reverse order
-        let toRollback = applied.suffix(count).reversed()
-        var rolledBack: [String] = []
-
-        for appliedMigration in toRollback {
-            let id = appliedMigration.id
-
-            let (migration, sql) = try fileManager.read(id: id)
-
-            // Check for irreversible changes
-            if !migration.irreversibleChanges.isEmpty && !force {
-                throw PGSchemaEvoError.migrationHasIrreversibleChanges(
-                    id: id,
-                    changes: migration.irreversibleChanges
-                )
+            guard !applied.isEmpty else {
+                logger.info("No applied migrations to rollback")
+                try await conn.close()
+                return []
             }
 
-            let fullDownSQL = sql.fullDownSQL
-            if fullDownSQL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                logger.warning("Migration \(id) has empty DOWN SQL, skipping execution")
-                if !dryRun {
-                    try await store.remove(id: id, on: conn)
-                }
-                rolledBack.append(id)
-                continue
-            }
+            // Rollback in reverse order
+            let toRollback = applied.suffix(count).reversed()
+            var rolledBack: [String] = []
 
-            if dryRun {
-                logger.info("Would rollback migration: \(id)")
-                print("-- Rollback: \(id)")
-                print("BEGIN;")
-                print(fullDownSQL)
-                print("COMMIT;")
-                print("")
-            } else {
-                logger.info("Rolling back migration: \(id)")
-                let shell = ShellRunner()
-                let script = "BEGIN;\n\(fullDownSQL)\nCOMMIT;"
-                let result = try await shell.run(
-                    command: "/usr/bin/env",
-                    arguments: ["psql"] + targetConfig.psqlArgs() + ["-v", "ON_ERROR_STOP=1"],
-                    environment: targetConfig.environment(),
-                    input: script
-                )
-                if result.exitCode != 0 {
-                    throw PGSchemaEvoError.shellCommandFailed(
-                        command: "psql (rollback \(id))",
-                        exitCode: result.exitCode,
-                        stderr: result.stderr
+            for appliedMigration in toRollback {
+                let id = appliedMigration.id
+
+                let (migration, sql) = try fileManager.read(id: id)
+
+                // Check for irreversible changes
+                if !migration.irreversibleChanges.isEmpty && !force {
+                    try await conn.close()
+                    throw PGSchemaEvoError.migrationHasIrreversibleChanges(
+                        id: id,
+                        changes: migration.irreversibleChanges
                     )
                 }
-                try await store.remove(id: id, on: conn)
+
+                let fullDownSQL = sql.fullDownSQL
+                if fullDownSQL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    logger.warning("Migration \(id) has empty DOWN SQL, skipping execution")
+                    if !dryRun {
+                        try await store.remove(id: id, on: conn)
+                    }
+                    rolledBack.append(id)
+                    continue
+                }
+
+                if dryRun {
+                    logger.info("Would rollback migration: \(id)")
+                    print("-- Rollback: \(id)")
+                    print("BEGIN;")
+                    print(fullDownSQL)
+                    print("COMMIT;")
+                    print("")
+                } else {
+                    logger.info("Rolling back migration: \(id)")
+                    let shell = ShellRunner()
+                    let script = "BEGIN;\n\(fullDownSQL)\nCOMMIT;"
+                    let result = try await shell.run(
+                        command: "/usr/bin/env",
+                        arguments: ["psql"] + targetConfig.psqlArgs() + ["-v", "ON_ERROR_STOP=1"],
+                        environment: targetConfig.environment(),
+                        input: script
+                    )
+                    if result.exitCode != 0 {
+                        try await conn.close()
+                        throw PGSchemaEvoError.shellCommandFailed(
+                            command: "psql (rollback \(id))",
+                            exitCode: result.exitCode,
+                            stderr: result.stderr
+                        )
+                    }
+                    try await store.remove(id: id, on: conn)
+                }
+
+                rolledBack.append(id)
             }
 
-            rolledBack.append(id)
+            try await conn.close()
+            return rolledBack
+        } catch {
+            try? await conn.close()
+            throw error
         }
-
-        return rolledBack
     }
 
     /// Get the status of all migrations.
@@ -207,37 +223,42 @@ public struct MigrationApplicator: Sendable {
         let allIds = try fileManager.listMigrations()
 
         let conn = try await PostgresConnectionHelper.connect(config: targetConfig, logger: logger)
-        defer { Task { try? await conn.close() } }
 
-        try await store.ensureTable(on: conn)
-        let applied = try await store.listAppliedMigrations(on: conn)
-        let appliedMap = Dictionary(uniqueKeysWithValues: applied.map { ($0.id, $0) })
+        do {
+            try await store.ensureTable(on: conn)
+            let applied = try await store.listAppliedMigrations(on: conn)
+            let appliedMap = Dictionary(uniqueKeysWithValues: applied.map { ($0.id, $0) })
 
-        var entries: [MigrationStatusEntry] = []
-        for id in allIds {
-            if let app = appliedMap[id] {
+            var entries: [MigrationStatusEntry] = []
+            for id in allIds {
+                if let app = appliedMap[id] {
+                    entries.append(MigrationStatusEntry(
+                        id: id,
+                        state: .applied,
+                        appliedAt: app.appliedAt,
+                        appliedBy: app.appliedBy
+                    ))
+                } else {
+                    entries.append(MigrationStatusEntry(id: id, state: .pending))
+                }
+            }
+
+            // Check for applied migrations not found in filesystem
+            for app in applied where !allIds.contains(app.id) {
                 entries.append(MigrationStatusEntry(
-                    id: id,
-                    state: .applied,
+                    id: app.id,
+                    state: .orphaned,
                     appliedAt: app.appliedAt,
                     appliedBy: app.appliedBy
                 ))
-            } else {
-                entries.append(MigrationStatusEntry(id: id, state: .pending))
             }
-        }
 
-        // Check for applied migrations not found in filesystem
-        for app in applied where !allIds.contains(app.id) {
-            entries.append(MigrationStatusEntry(
-                id: app.id,
-                state: .orphaned,
-                appliedAt: app.appliedAt,
-                appliedBy: app.appliedBy
-            ))
+            try await conn.close()
+            return MigrationStatus(entries: entries)
+        } catch {
+            try? await conn.close()
+            throw error
         }
-
-        return MigrationStatus(entries: entries)
     }
 }
 
