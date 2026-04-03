@@ -199,7 +199,7 @@ llvm-cov report \
 
 | Metric | Value |
 |--------|-------|
-| Line coverage | **83.95%** (max 1% regression per PR) |
+| Line coverage | **84.00%** (max 1% regression per PR) |
 | Test suites | 38 suites, 619 tests (unit + integration) |
 
 > Coverage is automatically updated in this README on each merge to main.
