@@ -381,6 +381,19 @@ struct ConfigLoaderEdgeCaseTests {
         #expect(config.parallel == 0)
     }
 
+    // MARK: - File read errors
+
+    @Test("Config file that exists but cannot be read throws error")
+    func unreadableConfigFile() throws {
+        // Create a directory where a file is expected
+        let dirPath = NSTemporaryDirectory() + "pg-schema-evo-unreadable-\(UUID().uuidString).yaml"
+        try FileManager.default.createDirectory(atPath: dirPath, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dirPath) }
+        #expect(throws: PGSchemaEvoError.self) {
+            try loader.load(path: dirPath)
+        }
+    }
+
     // MARK: - Helper
 
     private func writeTempFile(_ content: String) throws -> String {

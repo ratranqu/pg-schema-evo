@@ -123,6 +123,13 @@ struct DatabaseObjectTests {
         }
     }
 
+    @Test("Reject empty object name")
+    func rejectEmptyName() {
+        #expect(throws: PGSchemaEvoError.self) {
+            try parseObjectSpecifier("table:")
+        }
+    }
+
     // MARK: - ObjectType.displayName (all types)
 
     @Test("displayName for materializedView")

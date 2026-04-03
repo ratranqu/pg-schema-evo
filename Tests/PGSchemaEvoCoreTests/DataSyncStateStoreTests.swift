@@ -77,6 +77,36 @@ struct DataSyncStateStoreTests {
         #expect(loaded.tables.isEmpty)
     }
 
+    @Test("Load non-mapping root throws syncStateCorrupted")
+    func loadNonMappingRoot() throws {
+        let path = try writeTempFile("- item1\n- item2")
+        #expect(throws: PGSchemaEvoError.self) {
+            try store.load(path: path)
+        }
+    }
+
+    @Test("Load invalid table entry throws syncStateCorrupted")
+    func loadInvalidTableEntry() throws {
+        let yaml = """
+            tables:
+              users: "just a string, not a mapping"
+            """
+        let path = try writeTempFile(yaml)
+        #expect(throws: PGSchemaEvoError.self) {
+            try store.load(path: path)
+        }
+    }
+
+    @Test("Load file that cannot be read throws syncStateCorrupted")
+    func loadUnreadableFile() throws {
+        let dirPath = NSTemporaryDirectory() + "pg-schema-evo-dir-\(UUID().uuidString).yaml"
+        try FileManager.default.createDirectory(atPath: dirPath, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dirPath) }
+        #expect(throws: PGSchemaEvoError.self) {
+            try store.load(path: dirPath)
+        }
+    }
+
     @Test("Integer last_value is preserved as string")
     func integerLastValue() throws {
         let yaml = """
