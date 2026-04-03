@@ -200,7 +200,7 @@ llvm-cov report \
 | Metric | Value |
 |--------|-------|
 | Line coverage | **83.95%** (max 1% regression per PR) |
-| Test suites | 33 suites, 498 tests (unit + integration) |
+| Test suites | 38 suites, 619 tests (unit + integration) |
 
 > Coverage is automatically updated in this README on each merge to main.
 
@@ -212,4 +212,4 @@ llvm-cov report \
 
 ## Status
 
-Version 0.4.2 — Improved code coverage to 85%: new unit tests for SQLGenerator supportedTypes (all 7 generators), DataSyncStateStore error paths (100% line coverage), DatabaseObject parseObjectSpecifier edge cases, ConfigLoader file read errors. New integration tests covering live clone with RLS policies, partitioned table cloning, materialized view with REFRESH, permission copying, function/schema/extension cloning, cascade dependency resolution, pre-flight conflict detection, sync with column addition (ALTER path), syncAll mode, sync for views/composite types, and dry-run variants. Prior: expanded integration test coverage, performance enhancements (connection pooling, parallel data transfer, streaming COPY), enhanced schema migration with `diff --sql` complete migration scripts, DROP COLUMN/CONSTRAINT/INDEX support, trigger comparison, RLS policy comparison, safety flags, incremental data sync, selective cloning, dependency resolution, schema diffing, YAML config files, partitioned tables, RLS policies, selective data filters, pre-flight validation, and retry with rollback.
+Version 0.4.3 — Extended integration test coverage: 12 new integration tests covering YAML config loading (end-to-end parsing, CLI overrides, missing file error), schema diff edge cases (view definitions, enum labels, sequence parameters, function definitions, matching objects), error scenarios (nonexistent object clone), sync dry-run (missing enum creation, already-in-sync detection), and data transfer method variants (pg_dump vs COPY dry-run). Prior: improved code coverage to 85%, new unit tests for SQLGenerator supportedTypes, DataSyncStateStore error paths, DatabaseObject parseObjectSpecifier, ConfigLoader file read errors, live clone with RLS policies, partitioned table cloning, materialized view with REFRESH, permission copying, cascade dependency resolution, pre-flight conflict detection, sync with column addition, syncAll mode, sync for views/composite types, performance enhancements (connection pooling, parallel data transfer), schema migration with diff --sql, safety flags, incremental data sync, YAML config files, partitioned tables, RLS policies, selective data filters, pre-flight validation, and retry with rollback.
