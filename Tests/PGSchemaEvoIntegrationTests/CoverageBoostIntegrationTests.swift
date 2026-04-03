@@ -257,13 +257,14 @@ struct CoverageBoostIntegrationTests {
                 ObjectSpec(id: ObjectIdentifier(type: .function, schema: "public", name: "calculate_order_total", signature: "(integer)"))
             ],
             dryRun: true,
+            dropIfExists: true,
             skipPreflight: false
         )
 
         let checker = PreflightChecker(logger: IntegrationTestConfig.logger)
         let failures = try await checker.check(job: job)
 
-        let notFoundFailures = failures.filter { $0.contains("calculate_order_total") }
+        let notFoundFailures = failures.filter { $0.contains("not found") && $0.contains("calculate_order_total") }
         #expect(notFoundFailures.isEmpty)
     }
 
@@ -279,13 +280,14 @@ struct CoverageBoostIntegrationTests {
                 ObjectSpec(id: ObjectIdentifier(type: .view, schema: "public", name: "active_users"))
             ],
             dryRun: true,
+            dropIfExists: true,
             skipPreflight: false
         )
 
         let checker = PreflightChecker(logger: IntegrationTestConfig.logger)
         let failures = try await checker.check(job: job)
 
-        let notFoundFailures = failures.filter { $0.contains("active_users") }
+        let notFoundFailures = failures.filter { $0.contains("not found") && $0.contains("active_users") }
         #expect(notFoundFailures.isEmpty)
     }
 
@@ -301,13 +303,14 @@ struct CoverageBoostIntegrationTests {
                 ObjectSpec(id: ObjectIdentifier(type: .sequence, schema: "public", name: "invoice_number_seq"))
             ],
             dryRun: true,
+            dropIfExists: true,
             skipPreflight: false
         )
 
         let checker = PreflightChecker(logger: IntegrationTestConfig.logger)
         let failures = try await checker.check(job: job)
 
-        let notFoundFailures = failures.filter { $0.contains("invoice_number_seq") }
+        let notFoundFailures = failures.filter { $0.contains("not found") && $0.contains("invoice_number_seq") }
         #expect(notFoundFailures.isEmpty)
     }
 
@@ -323,13 +326,14 @@ struct CoverageBoostIntegrationTests {
                 ObjectSpec(id: ObjectIdentifier(type: .enum, schema: "public", name: "order_status"))
             ],
             dryRun: true,
+            dropIfExists: true,
             skipPreflight: false
         )
 
         let checker = PreflightChecker(logger: IntegrationTestConfig.logger)
         let failures = try await checker.check(job: job)
 
-        let notFoundFailures = failures.filter { $0.contains("order_status") }
+        let notFoundFailures = failures.filter { $0.contains("not found") && $0.contains("order_status") }
         #expect(notFoundFailures.isEmpty)
     }
 
@@ -345,13 +349,14 @@ struct CoverageBoostIntegrationTests {
                 ObjectSpec(id: ObjectIdentifier(type: .compositeType, schema: "public", name: "address"))
             ],
             dryRun: true,
+            dropIfExists: true,
             skipPreflight: false
         )
 
         let checker = PreflightChecker(logger: IntegrationTestConfig.logger)
         let failures = try await checker.check(job: job)
 
-        let notFoundFailures = failures.filter { $0.contains("address") }
+        let notFoundFailures = failures.filter { $0.contains("not found") && $0.contains("address") }
         #expect(notFoundFailures.isEmpty)
     }
 
@@ -367,13 +372,14 @@ struct CoverageBoostIntegrationTests {
                 ObjectSpec(id: ObjectIdentifier(type: .schema, name: "analytics"))
             ],
             dryRun: true,
+            dropIfExists: true,
             skipPreflight: false
         )
 
         let checker = PreflightChecker(logger: IntegrationTestConfig.logger)
         let failures = try await checker.check(job: job)
 
-        let notFoundFailures = failures.filter { $0.contains("analytics") }
+        let notFoundFailures = failures.filter { $0.contains("not found") && $0.contains("analytics") }
         #expect(notFoundFailures.isEmpty)
     }
 
@@ -412,13 +418,14 @@ struct CoverageBoostIntegrationTests {
                 ObjectSpec(id: ObjectIdentifier(type: .extension, name: "plpgsql"))
             ],
             dryRun: true,
+            dropIfExists: true,
             skipPreflight: false
         )
 
         let checker = PreflightChecker(logger: IntegrationTestConfig.logger)
         let failures = try await checker.check(job: job)
 
-        let notFoundFailures = failures.filter { $0.contains("plpgsql") }
+        let notFoundFailures = failures.filter { $0.contains("not found") && $0.contains("plpgsql") }
         #expect(notFoundFailures.isEmpty)
     }
 
