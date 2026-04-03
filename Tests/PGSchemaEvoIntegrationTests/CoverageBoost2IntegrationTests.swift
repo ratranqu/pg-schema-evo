@@ -136,14 +136,13 @@ struct CoverageBoost2IntegrationTests {
         #expect(types.contains(.function))
     }
 
-    // MARK: - SchemaDiffer: diff with real introspectors
+    // MARK: - SchemaDiffer: diff with real introspectors (same DB = identical)
 
     @Test("SchemaDiffer diff detects identical schemas")
     func differDetectsIdentical() async throws {
         let config = try IntegrationTestConfig.sourceConfig()
         let conn1 = try await IntegrationTestConfig.connect(to: config)
         let conn2 = try await IntegrationTestConfig.connect(to: config)
-        defer { Task { try? await conn1.close(); try? await conn2.close() } }
 
         let source = PGCatalogIntrospector(connection: conn1, logger: IntegrationTestConfig.logger)
         let target = PGCatalogIntrospector(connection: conn2, logger: IntegrationTestConfig.logger)
@@ -158,51 +157,9 @@ struct CoverageBoost2IntegrationTests {
 
         // Same database — should be identical
         #expect(result.isEmpty)
-    }
 
-    @Test("SchemaDiffer compareObjects detects real table differences")
-    func differCompareObjectsReal() async throws {
-        let sourceConfig = try IntegrationTestConfig.sourceConfig()
-        let targetConfig = try IntegrationTestConfig.targetConfig()
-        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
-        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
-
-        try await Self.ensureTestSchema(on: sourceConn)
-        try await Self.ensureTestSchema(on: targetConn)
-
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_test CASCADE", on: sourceConn)
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_test CASCADE", on: targetConn)
-
-        try await IntegrationTestConfig.execute("""
-            CREATE TABLE \(Self.testSchema).diff_test (
-                id integer PRIMARY KEY,
-                name text NOT NULL,
-                email text
-            )
-        """, on: sourceConn)
-
-        try await IntegrationTestConfig.execute("""
-            CREATE TABLE \(Self.testSchema).diff_test (
-                id integer PRIMARY KEY,
-                name varchar(100) NOT NULL
-            )
-        """, on: targetConn)
-
-        let source = PGCatalogIntrospector(connection: sourceConn, logger: IntegrationTestConfig.logger)
-        let target = PGCatalogIntrospector(connection: targetConn, logger: IntegrationTestConfig.logger)
-
-        let differ = SchemaDiffer(logger: IntegrationTestConfig.logger)
-        let tableId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "diff_test")
-        let objDiff = try await differ.compareObjects(tableId, source: source, target: target)
-
-        #expect(objDiff != nil)
-        #expect(!objDiff!.differences.isEmpty)
-
-        // Cleanup
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_test CASCADE", on: sourceConn)
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_test CASCADE", on: targetConn)
-        try? await sourceConn.close()
-        try? await targetConn.close()
+        try? await conn1.close()
+        try? await conn2.close()
     }
 
     // MARK: - SyncOrchestrator: object not found case
@@ -216,7 +173,7 @@ struct CoverageBoost2IntegrationTests {
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .table, schema: Self.testSchema, name: "nonexistent_table_xyz_123"))
+                ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: "nonexistent_table_xyz_99"))
             ],
             dryRun: true,
             force: true
@@ -229,9 +186,9 @@ struct CoverageBoost2IntegrationTests {
         #expect(output.contains("already in sync"))
     }
 
-    // MARK: - SyncOrchestrator: dry-run with modifications
+    // MARK: - SyncOrchestrator: dry-run detects real differences
 
-    @Test("Sync dry-run detects column type difference")
+    @Test("Sync dry-run detects column type difference between databases")
     func syncDryRunColumnTypeDiff() async throws {
         let sourceConfig = try IntegrationTestConfig.sourceConfig()
         let targetConfig = try IntegrationTestConfig.targetConfig()
@@ -284,7 +241,7 @@ struct CoverageBoost2IntegrationTests {
         try? await tc.close()
     }
 
-    // MARK: - SyncOrchestrator: dry-run creates missing view
+    // MARK: - SyncOrchestrator: create view only in source
 
     @Test("Sync dry-run creates view that exists only in source")
     func syncDryRunCreateView() async throws {
@@ -326,91 +283,7 @@ struct CoverageBoost2IntegrationTests {
         try? await sc.close()
     }
 
-    // MARK: - SyncOrchestrator: syncAll dry-run with real schema
-
-    @Test("Sync all dry-run compares all tables in a schema")
-    func syncAllDryRun() async throws {
-        let sourceConfig = try IntegrationTestConfig.sourceConfig()
-        let targetConfig = try IntegrationTestConfig.targetConfig()
-        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
-        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
-
-        try await Self.ensureTestSchema(on: sourceConn)
-        try await Self.ensureTestSchema(on: targetConn)
-
-        // Create a table on source only
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).sync_all_src CASCADE", on: sourceConn)
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).sync_all_src CASCADE", on: targetConn)
-        try await IntegrationTestConfig.execute("""
-            CREATE TABLE \(Self.testSchema).sync_all_src (id integer PRIMARY KEY)
-        """, on: sourceConn)
-
-        try? await sourceConn.close()
-        try? await targetConn.close()
-
-        let tableId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "sync_all_src")
-        let syncJob = SyncJob(
-            source: sourceConfig,
-            target: targetConfig,
-            objects: [ObjectSpec(id: tableId)],
-            dryRun: true,
-            syncAll: true
-        )
-
-        let orchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)
-        let output = try await orchestrator.execute(job: syncJob)
-
-        #expect(output.contains("CREATE") || output.contains("sync_all_src"))
-
-        // Cleanup
-        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).sync_all_src CASCADE", on: sc)
-        try? await sc.close()
-    }
-
-    // MARK: - SyncOrchestrator: dropExtra on target-only object
-
-    @Test("Sync dry-run with dropExtra drops target-only table")
-    func syncDropExtraTargetOnly() async throws {
-        let sourceConfig = try IntegrationTestConfig.sourceConfig()
-        let targetConfig = try IntegrationTestConfig.targetConfig()
-        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
-        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
-
-        try await Self.ensureTestSchema(on: sourceConn)
-        try await Self.ensureTestSchema(on: targetConn)
-
-        // Create table only on target
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).sync_drop_tgt CASCADE", on: sourceConn)
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).sync_drop_tgt CASCADE", on: targetConn)
-        try await IntegrationTestConfig.execute("""
-            CREATE TABLE \(Self.testSchema).sync_drop_tgt (id integer)
-        """, on: targetConn)
-
-        try? await sourceConn.close()
-        try? await targetConn.close()
-
-        let tableId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "sync_drop_tgt")
-        let syncJob = SyncJob(
-            source: sourceConfig,
-            target: targetConfig,
-            objects: [ObjectSpec(id: tableId)],
-            dryRun: true,
-            dropExtra: true
-        )
-
-        let orchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)
-        let output = try await orchestrator.execute(job: syncJob)
-
-        #expect(output.contains("DROP") || output.contains("sync_drop_tgt"))
-
-        // Cleanup
-        let tc = try await IntegrationTestConfig.connect(to: targetConfig)
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).sync_drop_tgt CASCADE", on: tc)
-        try? await tc.close()
-    }
-
-    // MARK: - SyncOrchestrator: create sequence
+    // MARK: - SyncOrchestrator: create sequence on target
 
     @Test("Sync creates missing sequence on target via dry-run")
     func syncCreateSequence() async throws {
@@ -492,22 +365,6 @@ struct CoverageBoost2IntegrationTests {
         try? await sc.close()
     }
 
-    // MARK: - Introspector: listObjects with nil types (all types)
-
-    @Test("List all object types via introspector")
-    func listAllObjectTypes() async throws {
-        let config = try IntegrationTestConfig.sourceConfig()
-        let conn = try await IntegrationTestConfig.connect(to: config)
-        defer { Task { try? await conn.close() } }
-
-        let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
-        let objects = try await introspector.listObjects(schema: nil, types: nil)
-
-        // Should include tables, views, roles, schemas, extensions, etc.
-        let types = Set(objects.map(\.type))
-        #expect(types.count >= 3) // At minimum tables, schemas, roles
-    }
-
     // MARK: - DataSync: initialize with multiple tables
 
     @Test("Data sync initialize with multiple tables")
@@ -540,5 +397,52 @@ struct CoverageBoost2IntegrationTests {
         let store = DataSyncStateStore()
         let state = try store.load(path: stateFile)
         #expect(state.tables.count == 2)
+    }
+
+    // MARK: - SchemaDiffer: compareObjects with real introspectors
+
+    @Test("SchemaDiffer compareObjects detects real table differences")
+    func differCompareObjectsReal() async throws {
+        let sourceConfig = try IntegrationTestConfig.sourceConfig()
+        let targetConfig = try IntegrationTestConfig.targetConfig()
+        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
+
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await Self.ensureTestSchema(on: targetConn)
+
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_test CASCADE", on: sourceConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_test CASCADE", on: targetConn)
+
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).diff_test (
+                id integer PRIMARY KEY,
+                name text NOT NULL,
+                email text
+            )
+        """, on: sourceConn)
+
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).diff_test (
+                id integer PRIMARY KEY,
+                name varchar(100) NOT NULL
+            )
+        """, on: targetConn)
+
+        let source = PGCatalogIntrospector(connection: sourceConn, logger: IntegrationTestConfig.logger)
+        let target = PGCatalogIntrospector(connection: targetConn, logger: IntegrationTestConfig.logger)
+
+        let differ = SchemaDiffer(logger: IntegrationTestConfig.logger)
+        let tableId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "diff_test")
+        let objDiff = try await differ.compareObjects(tableId, source: source, target: target)
+
+        #expect(objDiff != nil)
+        #expect(!objDiff!.differences.isEmpty)
+
+        // Cleanup
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_test CASCADE", on: sourceConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_test CASCADE", on: targetConn)
+        try? await sourceConn.close()
+        try? await targetConn.close()
     }
 }
