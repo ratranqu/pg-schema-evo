@@ -127,17 +127,30 @@ struct FeatureCoverageIntegrationTests {
     func syncRole() async throws {
         let sourceConfig = try IntegrationTestConfig.sourceConfig()
         let targetConfig = try IntegrationTestConfig.targetConfig()
+        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
-        defer { Task { try? await targetConn.close() } }
+        defer {
+            Task { try? await sourceConn.close() }
+            Task { try? await targetConn.close() }
+        }
 
-        // Drop the role on target so sync detects it as missing
-        try await IntegrationTestConfig.execute("DROP ROLE IF EXISTS readonly_role", on: targetConn)
+        // Create a test-specific role on source to avoid cross-suite race on readonly_role
+        let roleName = "fc_test_sync_role"
+        try await IntegrationTestConfig.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '\(roleName)') THEN
+                    CREATE ROLE \(roleName) NOLOGIN;
+                END IF;
+            END $$
+            """, on: sourceConn)
+        // Ensure role does NOT exist on target
+        try await IntegrationTestConfig.execute("DROP ROLE IF EXISTS \(roleName)", on: targetConn)
 
         let job = SyncJob(
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .role, schema: nil, name: "readonly_role")),
+                ObjectSpec(id: ObjectIdentifier(type: .role, schema: nil, name: roleName)),
             ],
             dryRun: true,
             force: true,
@@ -147,11 +160,12 @@ struct FeatureCoverageIntegrationTests {
         let orchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)
         let script = try await orchestrator.execute(job: job)
 
-        #expect(script.contains("readonly_role"), "Script should reference the role")
+        #expect(script.contains(roleName), "Script should reference the role")
         #expect(script.contains("CREATE") || script.contains("ROLE"), "Script should contain CREATE ROLE")
 
-        // Recreate the role for other tests
-        try await IntegrationTestConfig.execute("CREATE ROLE readonly_role NOLOGIN", on: targetConn)
+        // Cleanup
+        try await IntegrationTestConfig.execute("DROP ROLE IF EXISTS \(roleName)", on: sourceConn)
+        try await IntegrationTestConfig.execute("DROP ROLE IF EXISTS \(roleName)", on: targetConn)
     }
 
     // MARK: - 3. Full End-to-End Data Sync Workflow
@@ -483,10 +497,24 @@ struct FeatureCoverageIntegrationTests {
             Task { try? await targetConn.close() }
         }
 
-        // Create a table on target with a missing column vs source
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.products CASCADE", on: targetConn)
+        // Use a test-specific table to avoid cross-suite race on shared tables
+        let tableName = "fc_diff_migration_test"
+
+        // Create table with extra column on source
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(tableName) CASCADE", on: sourceConn)
         try await IntegrationTestConfig.execute("""
-            CREATE TABLE public.products (
+            CREATE TABLE public.\(tableName) (
+                id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                name text NOT NULL,
+                description text,
+                price numeric(10, 2) NOT NULL DEFAULT 0
+            )
+            """, on: sourceConn)
+
+        // Create same table on target but with fewer columns
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(tableName) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE public.\(tableName) (
                 id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                 name text NOT NULL
             )
@@ -496,10 +524,10 @@ struct FeatureCoverageIntegrationTests {
         let targetIntrospector = PGCatalogIntrospector(connection: targetConn, logger: IntegrationTestConfig.logger)
         let differ = SchemaDiffer(logger: IntegrationTestConfig.logger)
 
-        let productsId = ObjectIdentifier(type: .table, schema: "public", name: "products")
-        let objDiff = try await differ.compareObjects(productsId, source: sourceIntrospector, target: targetIntrospector)
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: tableName)
+        let objDiff = try await differ.compareObjects(tableId, source: sourceIntrospector, target: targetIntrospector)
 
-        #expect(objDiff != nil, "Should detect column differences in products table")
+        #expect(objDiff != nil, "Should detect column differences in table")
         if let diff = objDiff {
             #expect(!diff.migrationSQL.isEmpty, "Should generate migration SQL for missing columns")
             let sql = diff.migrationSQL.joined(separator: "\n")
@@ -507,6 +535,7 @@ struct FeatureCoverageIntegrationTests {
         }
 
         // Cleanup
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.products CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(tableName) CASCADE", on: sourceConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS public.\(tableName) CASCADE", on: targetConn)
     }
 }
