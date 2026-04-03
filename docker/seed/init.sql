@@ -208,3 +208,19 @@ CREATE POLICY users_admin_all ON public.users
     TO postgres
     USING (true)
     WITH CHECK (true);
+
+-- ============================================================
+-- Procedures
+-- ============================================================
+CREATE OR REPLACE PROCEDURE public.reset_order_totals()
+LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE public.orders SET total = 0;
+END;
+$$;
+
+-- ============================================================
+-- Extensions (additional)
+-- ============================================================
+-- pg_trgm is commonly available and useful for testing
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
