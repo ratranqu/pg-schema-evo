@@ -9,6 +9,11 @@ struct ExtendedIntegrationTests {
 
     private static let testSchema = "_ext_test"
 
+    private static func ensureCleanTestSchema(on conn: PostgresConnection) async throws {
+        try await IntegrationTestConfig.execute("DROP SCHEMA IF EXISTS \(testSchema) CASCADE", on: conn)
+        try await IntegrationTestConfig.execute("CREATE SCHEMA \(testSchema)", on: conn)
+    }
+
     private static func ensureTestSchema(on conn: PostgresConnection) async throws {
         try await IntegrationTestConfig.execute("CREATE SCHEMA IF NOT EXISTS \(testSchema)", on: conn)
     }
@@ -56,17 +61,17 @@ struct ExtendedIntegrationTests {
         #expect(config.dropIfExists == true)
 
         // Verify the config can produce a dry-run clone
-        var cloneJob = config.toCloneJob()
+        let baseJob = config.toCloneJob()
         // Override to dry-run for safety
-        cloneJob = CloneJob(
-            source: cloneJob.source,
-            target: cloneJob.target,
-            objects: cloneJob.objects,
+        let cloneJob = CloneJob(
+            source: baseJob.source,
+            target: baseJob.target,
+            objects: baseJob.objects,
             dryRun: true,
-            defaultDataMethod: cloneJob.defaultDataMethod,
-            dataSizeThreshold: cloneJob.dataSizeThreshold,
-            dropIfExists: cloneJob.dropIfExists,
-            parallel: cloneJob.parallel
+            defaultDataMethod: baseJob.defaultDataMethod,
+            dataSizeThreshold: baseJob.dataSizeThreshold,
+            dropIfExists: baseJob.dropIfExists,
+            parallel: baseJob.parallel
         )
 
         let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
@@ -312,15 +317,9 @@ struct ExtendedIntegrationTests {
         let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
 
-        try await Self.ensureTestSchema(on: sourceConn)
-        try await Self.ensureTestSchema(on: targetConn)
-
-        // Create 2 tables on source, 1 matching on target, 1 extra on target
-        for conn in [sourceConn, targetConn] {
-            try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_shared CASCADE", on: conn)
-            try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_source_only CASCADE", on: conn)
-            try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_target_only CASCADE", on: conn)
-        }
+        // Clean slate: drop and recreate schema to avoid stale objects from other tests
+        try await Self.ensureCleanTestSchema(on: sourceConn)
+        try await Self.ensureCleanTestSchema(on: targetConn)
 
         // Shared table on both
         for conn in [sourceConn, targetConn] {
@@ -509,9 +508,19 @@ struct ExtendedIntegrationTests {
     func liveCloneFunction() async throws {
         let sourceConfig = try IntegrationTestConfig.sourceConfig()
         let targetConfig = try IntegrationTestConfig.targetConfig()
+        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
         let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
 
-        try await IntegrationTestConfig.execute("DROP FUNCTION IF EXISTS public.calculate_order_total(integer) CASCADE", on: targetConn)
+        // Create a self-contained function in isolated schema (no external table deps)
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await Self.ensureTestSchema(on: targetConn)
+        try await IntegrationTestConfig.execute("DROP FUNCTION IF EXISTS \(Self.testSchema).ext_clone_func(integer) CASCADE", on: sourceConn)
+        try await IntegrationTestConfig.execute("DROP FUNCTION IF EXISTS \(Self.testSchema).ext_clone_func(integer) CASCADE", on: targetConn)
+        try await IntegrationTestConfig.execute("""
+            CREATE FUNCTION \(Self.testSchema).ext_clone_func(x integer) RETURNS integer AS $$ SELECT x * 7; $$ LANGUAGE sql IMMUTABLE
+        """, on: sourceConn)
+
+        try? await sourceConn.close()
         try? await targetConn.close()
 
         let job = CloneJob(
@@ -519,7 +528,7 @@ struct ExtendedIntegrationTests {
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .function, schema: "public", name: "calculate_order_total", signature: "(integer)")
+                    id: ObjectIdentifier(type: .function, schema: Self.testSchema, name: "ext_clone_func", signature: "(integer)")
                 ),
             ],
             dryRun: false,
@@ -535,7 +544,7 @@ struct ExtendedIntegrationTests {
         // Verify function exists on target
         let vc = try await IntegrationTestConfig.connect(to: targetConfig)
         let rows = try await vc.query(
-            PostgresQuery(unsafeSQL: "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'public' AND p.proname = 'calculate_order_total'"),
+            PostgresQuery(unsafeSQL: "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = '\(Self.testSchema)' AND p.proname = 'ext_clone_func'"),
             logger: IntegrationTestConfig.logger
         )
         for try await row in rows {
@@ -543,8 +552,12 @@ struct ExtendedIntegrationTests {
             #expect(count >= 1, "Function should exist on target after clone")
         }
 
-        try await IntegrationTestConfig.execute("DROP FUNCTION IF EXISTS public.calculate_order_total(integer) CASCADE", on: vc)
+        try await IntegrationTestConfig.execute("DROP FUNCTION IF EXISTS \(Self.testSchema).ext_clone_func(integer) CASCADE", on: vc)
         try? await vc.close()
+
+        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
+        try await IntegrationTestConfig.execute("DROP FUNCTION IF EXISTS \(Self.testSchema).ext_clone_func(integer) CASCADE", on: sc)
+        try? await sc.close()
     }
 
     // MARK: - Data Integrity After Clone
