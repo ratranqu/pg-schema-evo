@@ -6,22 +6,22 @@ This document maps integration tests to the **user-facing features** they exerci
 
 | File | Tests | Focus |
 |------|-------|-------|
-| `CloneIntegrationTests` | 8 | Basic clone operations |
-| `AdvancedCloneIntegrationTests` | 10 | Cascade, permissions, RLS, partitions |
-| `SyncIntegrationTests` | 6 | Basic sync operations |
-| `AdvancedSyncIntegrationTests` | 8 | Alter, drop columns, drop extra |
-| `IntrospectionIntegrationTests` | 12 | Database metadata discovery |
-| `Phase4IntegrationTests` | 10 | Schema diffing, WHERE/LIMIT filters |
-| `OrchestratorIntegrationTests` | 8 | Orchestrator, connection pooling |
+| `CloneIntegrationTests` | 6 | Basic clone operations |
+| `AdvancedCloneIntegrationTests` | 17 | Cascade, permissions, RLS, partitions |
+| `SyncIntegrationTests` | 5 | Basic sync operations |
+| `AdvancedSyncIntegrationTests` | 7 | Alter, drop columns, drop extra |
+| `IntrospectionIntegrationTests` | 20 | Database metadata discovery |
+| `Phase4IntegrationTests` | 9 | Schema diffing, WHERE/LIMIT filters |
+| `OrchestratorIntegrationTests` | 26 | Orchestrator, connection pooling |
 | `SchemaMigrationIntegrationTests` | 15 | Schema migration and evolution |
-| `MigrationTrackingIntegrationTests` | 12 | Migration versioning and tracking |
+| `MigrationTrackingIntegrationTests` | 8 | Migration versioning and tracking |
 | `DataSyncIntegrationTests` | 8 | Data synchronization |
-| `ExtendedIntegrationTests` | 10 | Config loading, diff edge cases |
-| `ExtendedIntegrationTests2` | 9 | Constraint/index diffing |
-| `CoverageBoostIntegrationTests` | 6 | Allow drop columns, extra paths |
-| `CoverageBoost2IntegrationTests` | 8 | Object type introspection |
-| `LiveExecutionIntegrationTests` | 10 | Live database execution |
-| `LiveExecutionCoverageTests` | 51 | Comprehensive live execution paths |
+| `ExtendedIntegrationTests` | 13 | Config loading, diff edge cases |
+| `ExtendedIntegrationTests2` | 8 | Constraint/index diffing |
+| `CoverageBoostIntegrationTests` | 20 | Allow drop columns, extra paths |
+| `CoverageBoost2IntegrationTests` | 25 | Object type introspection |
+| `LiveExecutionIntegrationTests` | 8 | Live database execution |
+| `LiveExecutionCoverageTests` | 50 | Comprehensive live execution paths |
 | `FeatureCoverageIntegrationTests` | 11 | Feature gap coverage (see below) |
 
 ---
