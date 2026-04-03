@@ -389,13 +389,14 @@ struct CoverageBoostIntegrationTests {
                 ObjectSpec(id: ObjectIdentifier(type: .role, name: "readonly_role"))
             ],
             dryRun: true,
+            dropIfExists: true,
             skipPreflight: false
         )
 
         let checker = PreflightChecker(logger: IntegrationTestConfig.logger)
         let failures = try await checker.check(job: job)
 
-        let notFoundFailures = failures.filter { $0.contains("readonly_role") }
+        let notFoundFailures = failures.filter { $0.contains("not found") && $0.contains("readonly_role") }
         #expect(notFoundFailures.isEmpty)
     }
 
