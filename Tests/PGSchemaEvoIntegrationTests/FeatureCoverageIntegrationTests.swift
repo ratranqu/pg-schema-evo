@@ -468,15 +468,7 @@ struct FeatureCoverageIntegrationTests {
         let targetIntrospector = PGCatalogIntrospector(connection: targetConn, logger: IntegrationTestConfig.logger)
         let differ = SchemaDiffer(logger: IntegrationTestConfig.logger)
 
-        // Diff public schema sequences (stable — not dropped by other suites)
-        let publicDiff = try await differ.diff(
-            source: sourceIntrospector,
-            target: targetIntrospector,
-            schema: "public",
-            types: [.sequence]
-        )
-
-        // Diff analytics schema matviews
+        // Diff analytics schema matviews (analytics schema is not touched by other suites)
         let analyticsDiff = try await differ.diff(
             source: sourceIntrospector,
             target: targetIntrospector,
@@ -484,17 +476,38 @@ struct FeatureCoverageIntegrationTests {
             types: [.materializedView]
         )
 
-        // Source has sequences in public
-        #expect(publicDiff.onlyInSource.count >= 0 || publicDiff.matching >= 0, "Public diff should return results")
+        // Also diff our dedicated fc_test schema to exercise multi-schema diffing
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await Self.ensureTestSchema(on: targetConn)
+        // Create a table only on source in fc_test schema
+        let tableName = "diff_only_source"
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(tableName) CASCADE", on: sourceConn)
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).\(tableName) (id int PRIMARY KEY)
+            """, on: sourceConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(tableName) CASCADE", on: targetConn)
+
+        let fcDiff = try await differ.diff(
+            source: sourceIntrospector,
+            target: targetIntrospector,
+            schema: Self.testSchema,
+            types: [.table]
+        )
 
         // analytics.daily_order_summary should be only in source
         #expect(analyticsDiff.onlyInSource.count >= 1, "Analytics matview should be only in source")
         let matviewFound = analyticsDiff.onlyInSource.contains { $0.name == "daily_order_summary" }
         #expect(matviewFound, "daily_order_summary should be in onlyInSource for analytics schema")
 
-        // Render combined output — at least the analytics diff should have content
+        // fc_test table should be only in source
+        #expect(fcDiff.onlyInSource.count >= 1, "fc_test table should be only in source")
+
+        // Render output to exercise multi-schema diff rendering
         let analyticsText = analyticsDiff.renderText()
         #expect(analyticsText.contains("daily_order_summary"), "Analytics diff should mention matview")
+
+        // Cleanup
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).\(tableName) CASCADE", on: sourceConn)
     }
 
     @Test("Diff generates migration SQL across schemas")
