@@ -41,7 +41,7 @@ jobs:
           key: swift-build-${{ runner.os }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Sources/**/*.swift') }}
 
       - name: Run unit tests with coverage
-        run: swift test --filter PGSchemaEvoCoreTests --enable-code-coverage
+        run: swift test --filter 'PGSchemaEvoCoreTests|DataMaskingTests' --enable-code-coverage
 
       - name: Generate coverage report
         run: |
