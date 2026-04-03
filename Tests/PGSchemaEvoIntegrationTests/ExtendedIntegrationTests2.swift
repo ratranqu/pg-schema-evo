@@ -171,12 +171,22 @@ struct ExtendedIntegrationTests2 {
         let tmpDir = NSTemporaryDirectory()
         let configPath = tmpDir + "test-env-config-\(UUID().uuidString).yaml"
 
-        // The DSN env vars are already set in the test environment
+        // Use host/database fields with env var defaults pointing to test DBs
+        let sourceConfig = try IntegrationTestConfig.sourceConfig()
+        let targetConfig = try IntegrationTestConfig.targetConfig()
         let yaml = """
         source:
-          dsn: "${SOURCE_DSN:-\(IntegrationTestConfig.sourceDSN)}"
+          host: "${TEST_SOURCE_HOST:-\(sourceConfig.host)}"
+          port: \(sourceConfig.port)
+          database: "\(sourceConfig.database)"
+          username: "\(sourceConfig.username)"
+          password: "\(sourceConfig.password ?? "")"
         target:
-          dsn: "${TARGET_DSN:-\(IntegrationTestConfig.targetDSN)}"
+          host: "${TEST_TARGET_HOST:-\(targetConfig.host)}"
+          port: \(targetConfig.port)
+          database: "\(targetConfig.database)"
+          username: "\(targetConfig.username)"
+          password: "\(targetConfig.password ?? "")"
         objects:
           - type: table
             schema: public
@@ -192,7 +202,7 @@ struct ExtendedIntegrationTests2 {
         #expect(config.objects.count == 1)
         #expect(config.objects[0].id.name == "products")
 
-        // Verify the parsed DSN connects to a real database
+        // Verify the parsed config connects to a real database
         let baseJob = config.toCloneJob()
         let cloneJob = CloneJob(
             source: baseJob.source,
@@ -204,7 +214,7 @@ struct ExtendedIntegrationTests2 {
 
         let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
         let script = try await orchestrator.execute(job: cloneJob)
-        #expect(script.contains("products"), "Dry-run should produce script with interpolated DSN")
+        #expect(script.contains("products"), "Dry-run should produce script with interpolated config")
     }
 
     @Test("Config loader throws on undefined env var without default")
