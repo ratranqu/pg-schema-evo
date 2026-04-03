@@ -200,7 +200,7 @@ llvm-cov report \
 | Metric | Value |
 |--------|-------|
 | Line coverage | **84.17%** (max 1% regression per PR) |
-| Test suites | 39 suites, 633 tests (unit + integration) |
+| Test suites | 39 suites, 631 tests (unit + integration) |
 
 > Coverage is automatically updated in this README on each merge to main.
 
@@ -212,4 +212,4 @@ llvm-cov report \
 
 ## Status
 
-Version 0.4.4 — Extended integration tests batch 2: 11 new tests covering constraint/index diff detection with ALTER generation, column type and default change detection, env var interpolation in YAML config (with defaults and undefined var errors), PL/pgSQL function introspection with DECLARE/EXCEPTION blocks, enum label ordering preservation, wide table introspection (50 columns), composite type cloning, sequence parameter preservation (INCREMENT/MINVALUE/MAXVALUE/CACHE/CYCLE). Prior: 12 integration tests for config loading, schema diff, sync, clone error paths. Improved code coverage to 85%+, performance enhancements (connection pooling, parallel data transfer), schema migration with diff --sql, safety flags, incremental data sync, YAML config files, partitioned tables, RLS policies, selective data filters, pre-flight validation, and retry with rollback.
+Version 0.4.4 — Extended integration tests batch 2: 9 new tests covering constraint/index diff detection with ALTER generation, column type and default change detection, PL/pgSQL function introspection with DECLARE/EXCEPTION blocks, enum label ordering preservation, wide table introspection (50 columns), composite type cloning, sequence parameter preservation (INCREMENT/MINVALUE/MAXVALUE/CACHE/CYCLE). Fixed PreflightChecker connection leak that crashed test process. Prior: 12 integration tests for config loading, schema diff, sync, clone error paths. Improved code coverage to 85%+, performance enhancements (connection pooling, parallel data transfer), schema migration with diff --sql, safety flags, incremental data sync, YAML config files, partitioned tables, RLS policies, selective data filters, pre-flight validation, and retry with rollback.
