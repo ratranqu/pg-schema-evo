@@ -92,6 +92,8 @@ public struct SchemaDiffer: Sendable {
         var differences: [String] = []
         var migrationSQL: [String] = []
         var dropColumnSQL: [String] = []
+        var reverseMigrationSQL: [String] = []
+        var reverseDropColumnSQL: [String] = []
 
         // Compare columns
         let srcCols = Dictionary(uniqueKeysWithValues: srcMeta.columns.map { ($0.name, $0) })
@@ -102,11 +104,14 @@ public struct SchemaDiffer: Sendable {
                 if srcCol.dataType != tgtCol.dataType {
                     differences.append("Column \(name): type \(tgtCol.dataType) -> \(srcCol.dataType)")
                     migrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) TYPE \(srcCol.dataType);")
+                    reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) TYPE \(tgtCol.dataType);")
                 }
                 if srcCol.isNullable != tgtCol.isNullable {
                     let change = srcCol.isNullable ? "DROP NOT NULL" : "SET NOT NULL"
+                    let reverseChange = srcCol.isNullable ? "SET NOT NULL" : "DROP NOT NULL"
                     differences.append("Column \(name): nullability changed")
                     migrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) \(change);")
+                    reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) \(reverseChange);")
                 }
                 if srcCol.columnDefault != tgtCol.columnDefault {
                     differences.append("Column \(name): default changed")
@@ -115,6 +120,11 @@ public struct SchemaDiffer: Sendable {
                     } else {
                         migrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) DROP DEFAULT;")
                     }
+                    if let def = tgtCol.columnDefault {
+                        reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) SET DEFAULT \(def);")
+                    } else {
+                        reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) DROP DEFAULT;")
+                    }
                 }
             } else {
                 differences.append("Column \(name): missing in target (type: \(srcCol.dataType))")
@@ -122,12 +132,17 @@ public struct SchemaDiffer: Sendable {
                 if !srcCol.isNullable { colDef += " NOT NULL" }
                 if let def = srcCol.columnDefault { colDef += " DEFAULT \(def)" }
                 migrationSQL.append("ALTER TABLE \(id.qualifiedName) ADD COLUMN \(colDef);")
+                reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) DROP COLUMN \(quoteIdent(name));")
             }
         }
 
-        for (name, _) in tgtCols where srcCols[name] == nil {
+        for (name, tgtCol) in tgtCols where srcCols[name] == nil {
             differences.append("Column \(name): extra in target (not in source)")
             dropColumnSQL.append("ALTER TABLE \(id.qualifiedName) DROP COLUMN \(quoteIdent(name));")
+            var colDef = "\(quoteIdent(name)) \(tgtCol.dataType)"
+            if !tgtCol.isNullable { colDef += " NOT NULL" }
+            if let def = tgtCol.columnDefault { colDef += " DEFAULT \(def)" }
+            reverseDropColumnSQL.append("ALTER TABLE \(id.qualifiedName) ADD COLUMN \(colDef);")
         }
 
         // Compare constraints
@@ -137,11 +152,15 @@ public struct SchemaDiffer: Sendable {
             if let con = srcMeta.constraints.first(where: { $0.name == name }) {
                 differences.append("Constraint \(name): missing in target")
                 migrationSQL.append("ALTER TABLE \(id.qualifiedName) ADD CONSTRAINT \(quoteIdent(name)) \(con.definition);")
+                reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) DROP CONSTRAINT \(quoteIdent(name));")
             }
         }
         for name in tgtConstraints.subtracting(srcConstraints) {
             differences.append("Constraint \(name): extra in target")
             dropColumnSQL.append("ALTER TABLE \(id.qualifiedName) DROP CONSTRAINT \(quoteIdent(name));")
+            if let con = tgtMeta.constraints.first(where: { $0.name == name }) {
+                reverseDropColumnSQL.append("ALTER TABLE \(id.qualifiedName) ADD CONSTRAINT \(quoteIdent(name)) \(con.definition);")
+            }
         }
 
         // Compare indexes
@@ -151,11 +170,15 @@ public struct SchemaDiffer: Sendable {
             if let idx = srcMeta.indexes.first(where: { $0.name == name }) {
                 differences.append("Index \(name): missing in target")
                 migrationSQL.append("\(idx.definition);")
+                reverseMigrationSQL.append("DROP INDEX \(id.schema.map { quoteIdent($0) + "." } ?? "")\(quoteIdent(name));")
             }
         }
         for name in tgtIndexes.subtracting(srcIndexes) {
             differences.append("Index \(name): extra in target")
             dropColumnSQL.append("DROP INDEX \(id.schema.map { quoteIdent($0) + "." } ?? "")\(quoteIdent(name));")
+            if let idx = tgtMeta.indexes.first(where: { $0.name == name }) {
+                reverseDropColumnSQL.append("\(idx.definition);")
+            }
         }
 
         // Compare triggers
@@ -168,15 +191,19 @@ public struct SchemaDiffer: Sendable {
                     differences.append("Trigger \(name): definition differs")
                     migrationSQL.append("DROP TRIGGER \(quoteIdent(name)) ON \(id.qualifiedName);")
                     migrationSQL.append("\(srcTrigger.definition);")
+                    reverseMigrationSQL.append("DROP TRIGGER \(quoteIdent(name)) ON \(id.qualifiedName);")
+                    reverseMigrationSQL.append("\(tgtTrigger.definition);")
                 }
             } else {
                 differences.append("Trigger \(name): missing in target")
                 migrationSQL.append("\(srcTrigger.definition);")
+                reverseMigrationSQL.append("DROP TRIGGER \(quoteIdent(name)) ON \(id.qualifiedName);")
             }
         }
-        for (name, _) in tgtTriggers where srcTriggers[name] == nil {
+        for (name, tgtTrigger) in tgtTriggers where srcTriggers[name] == nil {
             differences.append("Trigger \(name): extra in target")
             dropColumnSQL.append("DROP TRIGGER \(quoteIdent(name)) ON \(id.qualifiedName);")
+            reverseDropColumnSQL.append("\(tgtTrigger.definition);")
         }
 
         // Compare RLS policies
@@ -187,9 +214,11 @@ public struct SchemaDiffer: Sendable {
             if srcRLS.isEnabled {
                 differences.append("RLS: not enabled on target")
                 migrationSQL.append("ALTER TABLE \(id.qualifiedName) ENABLE ROW LEVEL SECURITY;")
+                reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) DISABLE ROW LEVEL SECURITY;")
             } else {
                 differences.append("RLS: enabled on target but not on source")
                 dropColumnSQL.append("ALTER TABLE \(id.qualifiedName) DISABLE ROW LEVEL SECURITY;")
+                reverseDropColumnSQL.append("ALTER TABLE \(id.qualifiedName) ENABLE ROW LEVEL SECURITY;")
             }
         }
 
@@ -197,9 +226,11 @@ public struct SchemaDiffer: Sendable {
             if srcRLS.isForced {
                 differences.append("RLS: not forced on target")
                 migrationSQL.append("ALTER TABLE \(id.qualifiedName) FORCE ROW LEVEL SECURITY;")
+                reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) NO FORCE ROW LEVEL SECURITY;")
             } else {
                 differences.append("RLS: forced on target but not on source")
                 dropColumnSQL.append("ALTER TABLE \(id.qualifiedName) NO FORCE ROW LEVEL SECURITY;")
+                reverseDropColumnSQL.append("ALTER TABLE \(id.qualifiedName) FORCE ROW LEVEL SECURITY;")
             }
         }
 
@@ -212,15 +243,19 @@ public struct SchemaDiffer: Sendable {
                     differences.append("RLS policy \(name): definition differs")
                     migrationSQL.append("DROP POLICY \(quoteIdent(name)) ON \(id.qualifiedName);")
                     migrationSQL.append("\(srcPolicy.definition);")
+                    reverseMigrationSQL.append("DROP POLICY \(quoteIdent(name)) ON \(id.qualifiedName);")
+                    reverseMigrationSQL.append("\(tgtPolicy.definition);")
                 }
             } else {
                 differences.append("RLS policy \(name): missing in target")
                 migrationSQL.append("\(srcPolicy.definition);")
+                reverseMigrationSQL.append("DROP POLICY \(quoteIdent(name)) ON \(id.qualifiedName);")
             }
         }
-        for (name, _) in tgtPolicies where srcPolicies[name] == nil {
+        for (name, tgtPolicy) in tgtPolicies where srcPolicies[name] == nil {
             differences.append("RLS policy \(name): extra in target")
             dropColumnSQL.append("DROP POLICY \(quoteIdent(name)) ON \(id.qualifiedName);")
+            reverseDropColumnSQL.append("\(tgtPolicy.definition);")
         }
 
         guard !differences.isEmpty else { return nil }
@@ -229,7 +264,9 @@ public struct SchemaDiffer: Sendable {
             id: id,
             differences: differences,
             migrationSQL: migrationSQL,
-            dropColumnSQL: dropColumnSQL
+            dropColumnSQL: dropColumnSQL,
+            reverseMigrationSQL: reverseMigrationSQL,
+            reverseDropColumnSQL: reverseDropColumnSQL
         )
     }
 
@@ -259,7 +296,8 @@ public struct SchemaDiffer: Sendable {
         return ObjectDiff(
             id: id,
             differences: ["Definition differs"],
-            migrationSQL: ["CREATE OR REPLACE \(keyword) \(id.qualifiedName) AS\n\(srcDef);"]
+            migrationSQL: ["CREATE OR REPLACE \(keyword) \(id.qualifiedName) AS\n\(srcDef);"],
+            reverseMigrationSQL: ["CREATE OR REPLACE \(keyword) \(id.qualifiedName) AS\n\(tgtDef);"]
         )
     }
 
@@ -274,34 +312,45 @@ public struct SchemaDiffer: Sendable {
         var diffs: [String] = []
         var sql: [String] = []
         var alterParts: [String] = []
+        var reverseAlterParts: [String] = []
 
         if srcMeta.increment != tgtMeta.increment {
             diffs.append("INCREMENT: \(tgtMeta.increment) -> \(srcMeta.increment)")
             alterParts.append("INCREMENT BY \(srcMeta.increment)")
+            reverseAlterParts.append("INCREMENT BY \(tgtMeta.increment)")
         }
         if srcMeta.minValue != tgtMeta.minValue {
             diffs.append("MIN: \(tgtMeta.minValue) -> \(srcMeta.minValue)")
             alterParts.append("MINVALUE \(srcMeta.minValue)")
+            reverseAlterParts.append("MINVALUE \(tgtMeta.minValue)")
         }
         if srcMeta.maxValue != tgtMeta.maxValue {
             diffs.append("MAX: \(tgtMeta.maxValue) -> \(srcMeta.maxValue)")
             alterParts.append("MAXVALUE \(srcMeta.maxValue)")
+            reverseAlterParts.append("MAXVALUE \(tgtMeta.maxValue)")
         }
         if srcMeta.cacheSize != tgtMeta.cacheSize {
             diffs.append("CACHE: \(tgtMeta.cacheSize) -> \(srcMeta.cacheSize)")
             alterParts.append("CACHE \(srcMeta.cacheSize)")
+            reverseAlterParts.append("CACHE \(tgtMeta.cacheSize)")
         }
         if srcMeta.isCycled != tgtMeta.isCycled {
             diffs.append("CYCLE: \(tgtMeta.isCycled ? "YES" : "NO") -> \(srcMeta.isCycled ? "YES" : "NO")")
             alterParts.append(srcMeta.isCycled ? "CYCLE" : "NO CYCLE")
+            reverseAlterParts.append(tgtMeta.isCycled ? "CYCLE" : "NO CYCLE")
         }
 
         if !alterParts.isEmpty {
             sql.append("ALTER SEQUENCE \(id.qualifiedName) \(alterParts.joined(separator: " "));")
         }
 
+        var reverseSQL: [String] = []
+        if !reverseAlterParts.isEmpty {
+            reverseSQL.append("ALTER SEQUENCE \(id.qualifiedName) \(reverseAlterParts.joined(separator: " "));")
+        }
+
         guard !diffs.isEmpty else { return nil }
-        return ObjectDiff(id: id, differences: diffs, migrationSQL: sql)
+        return ObjectDiff(id: id, differences: diffs, migrationSQL: sql, reverseMigrationSQL: reverseSQL)
     }
 
     private func compareEnum(
@@ -319,26 +368,27 @@ public struct SchemaDiffer: Sendable {
 
         var diffs: [String] = []
         var sql: [String] = []
+        var irreversible: [String] = []
 
         let missingInTarget = srcLabels.filter { !tgtLabels.contains($0) }
         let extraInTarget = tgtLabels.filter { !srcLabels.contains($0) }
 
         for label in missingInTarget {
             diffs.append("Label '\(label)': missing in target")
-            // Find position: add after the preceding label or at end
             if let idx = srcLabels.firstIndex(of: label), idx > 0 {
                 let before = srcLabels[idx - 1]
                 sql.append("ALTER TYPE \(id.qualifiedName) ADD VALUE '\(escapeSQLString(label))' AFTER '\(escapeSQLString(before))';")
             } else {
                 sql.append("ALTER TYPE \(id.qualifiedName) ADD VALUE '\(escapeSQLString(label))';")
             }
+            irreversible.append("Cannot remove enum value '\(label)' from \(id.qualifiedName) (PostgreSQL limitation)")
         }
         for label in extraInTarget {
             diffs.append("Label '\(label)': extra in target (cannot remove enum values in PostgreSQL)")
         }
 
         guard !diffs.isEmpty else { return nil }
-        return ObjectDiff(id: id, differences: diffs, migrationSQL: sql)
+        return ObjectDiff(id: id, differences: diffs, migrationSQL: sql, irreversibleChanges: irreversible)
     }
 
     private func compareFunction(
@@ -358,7 +408,8 @@ public struct SchemaDiffer: Sendable {
         return ObjectDiff(
             id: id,
             differences: ["Function definition differs"],
-            migrationSQL: [srcDef + ";"]
+            migrationSQL: [srcDef + ";"],
+            reverseMigrationSQL: [tgtDef + ";"]
         )
     }
 
@@ -375,26 +426,30 @@ public struct SchemaDiffer: Sendable {
 
         var diffs: [String] = []
         var sql: [String] = []
+        var reverseSQL: [String] = []
 
         for (name, srcAttr) in srcAttrs {
             if let tgtAttr = tgtAttrs[name] {
                 if srcAttr.dataType != tgtAttr.dataType {
                     diffs.append("Attribute \(name): type \(tgtAttr.dataType) -> \(srcAttr.dataType)")
                     sql.append("ALTER TYPE \(id.qualifiedName) ALTER ATTRIBUTE \(quoteIdent(name)) TYPE \(srcAttr.dataType);")
+                    reverseSQL.append("ALTER TYPE \(id.qualifiedName) ALTER ATTRIBUTE \(quoteIdent(name)) TYPE \(tgtAttr.dataType);")
                 }
             } else {
                 diffs.append("Attribute \(name): missing in target (type: \(srcAttr.dataType))")
                 sql.append("ALTER TYPE \(id.qualifiedName) ADD ATTRIBUTE \(quoteIdent(name)) \(srcAttr.dataType);")
+                reverseSQL.append("ALTER TYPE \(id.qualifiedName) DROP ATTRIBUTE \(quoteIdent(name));")
             }
         }
 
-        for (name, _) in tgtAttrs where srcAttrs[name] == nil {
+        for (name, tgtAttr) in tgtAttrs where srcAttrs[name] == nil {
             diffs.append("Attribute \(name): extra in target")
             sql.append("ALTER TYPE \(id.qualifiedName) DROP ATTRIBUTE \(quoteIdent(name));")
+            reverseSQL.append("ALTER TYPE \(id.qualifiedName) ADD ATTRIBUTE \(quoteIdent(name)) \(tgtAttr.dataType);")
         }
 
         guard !diffs.isEmpty else { return nil }
-        return ObjectDiff(id: id, differences: diffs, migrationSQL: sql)
+        return ObjectDiff(id: id, differences: diffs, migrationSQL: sql, reverseMigrationSQL: reverseSQL)
     }
 
     private func compareSchema(
@@ -410,7 +465,8 @@ public struct SchemaDiffer: Sendable {
         return ObjectDiff(
             id: id,
             differences: ["Owner: \(tgtMeta.owner) -> \(srcMeta.owner)"],
-            migrationSQL: ["ALTER SCHEMA \(id.qualifiedName) OWNER TO \(quoteIdent(srcMeta.owner));"]
+            migrationSQL: ["ALTER SCHEMA \(id.qualifiedName) OWNER TO \(quoteIdent(srcMeta.owner));"],
+            reverseMigrationSQL: ["ALTER SCHEMA \(id.qualifiedName) OWNER TO \(quoteIdent(tgtMeta.owner));"]
         )
     }
 
@@ -424,31 +480,41 @@ public struct SchemaDiffer: Sendable {
 
         var diffs: [String] = []
         var alterParts: [String] = []
+        var reverseAlterParts: [String] = []
 
         if srcMeta.canLogin != tgtMeta.canLogin {
             diffs.append("LOGIN: \(tgtMeta.canLogin) -> \(srcMeta.canLogin)")
             alterParts.append(srcMeta.canLogin ? "LOGIN" : "NOLOGIN")
+            reverseAlterParts.append(tgtMeta.canLogin ? "LOGIN" : "NOLOGIN")
         }
         if srcMeta.isSuperuser != tgtMeta.isSuperuser {
             diffs.append("SUPERUSER: \(tgtMeta.isSuperuser) -> \(srcMeta.isSuperuser)")
             alterParts.append(srcMeta.isSuperuser ? "SUPERUSER" : "NOSUPERUSER")
+            reverseAlterParts.append(tgtMeta.isSuperuser ? "SUPERUSER" : "NOSUPERUSER")
         }
         if srcMeta.canCreateDB != tgtMeta.canCreateDB {
             diffs.append("CREATEDB: \(tgtMeta.canCreateDB) -> \(srcMeta.canCreateDB)")
             alterParts.append(srcMeta.canCreateDB ? "CREATEDB" : "NOCREATEDB")
+            reverseAlterParts.append(tgtMeta.canCreateDB ? "CREATEDB" : "NOCREATEDB")
         }
         if srcMeta.canCreateRole != tgtMeta.canCreateRole {
             diffs.append("CREATEROLE: \(tgtMeta.canCreateRole) -> \(srcMeta.canCreateRole)")
             alterParts.append(srcMeta.canCreateRole ? "CREATEROLE" : "NOCREATEROLE")
+            reverseAlterParts.append(tgtMeta.canCreateRole ? "CREATEROLE" : "NOCREATEROLE")
         }
         if srcMeta.connectionLimit != tgtMeta.connectionLimit {
             diffs.append("CONNECTION LIMIT: \(tgtMeta.connectionLimit) -> \(srcMeta.connectionLimit)")
             alterParts.append("CONNECTION LIMIT \(srcMeta.connectionLimit)")
+            reverseAlterParts.append("CONNECTION LIMIT \(tgtMeta.connectionLimit)")
         }
 
         var sql: [String] = []
+        var reverseSQL: [String] = []
         if !alterParts.isEmpty {
             sql.append("ALTER ROLE \(quoteIdent(id.name)) \(alterParts.joined(separator: " "));")
+        }
+        if !reverseAlterParts.isEmpty {
+            reverseSQL.append("ALTER ROLE \(quoteIdent(id.name)) \(reverseAlterParts.joined(separator: " "));")
         }
 
         // Membership changes
@@ -457,14 +523,16 @@ public struct SchemaDiffer: Sendable {
         for role in srcMembers.subtracting(tgtMembers) {
             diffs.append("Membership: missing GRANT \(role)")
             sql.append("GRANT \(quoteIdent(role)) TO \(quoteIdent(id.name));")
+            reverseSQL.append("REVOKE \(quoteIdent(role)) FROM \(quoteIdent(id.name));")
         }
         for role in tgtMembers.subtracting(srcMembers) {
             diffs.append("Membership: extra GRANT \(role)")
             sql.append("REVOKE \(quoteIdent(role)) FROM \(quoteIdent(id.name));")
+            reverseSQL.append("GRANT \(quoteIdent(role)) TO \(quoteIdent(id.name));")
         }
 
         guard !diffs.isEmpty else { return nil }
-        return ObjectDiff(id: id, differences: diffs, migrationSQL: sql)
+        return ObjectDiff(id: id, differences: diffs, migrationSQL: sql, reverseMigrationSQL: reverseSQL)
     }
 
     private func compareExtension(
@@ -480,7 +548,8 @@ public struct SchemaDiffer: Sendable {
         return ObjectDiff(
             id: id,
             differences: ["Version: \(tgtMeta.version) -> \(srcMeta.version)"],
-            migrationSQL: ["ALTER EXTENSION \(quoteIdent(id.name)) UPDATE TO '\(escapeSQLString(srcMeta.version))';"]
+            migrationSQL: ["ALTER EXTENSION \(quoteIdent(id.name)) UPDATE TO '\(escapeSQLString(srcMeta.version))';"],
+            reverseMigrationSQL: ["ALTER EXTENSION \(quoteIdent(id.name)) UPDATE TO '\(escapeSQLString(tgtMeta.version))';"]
         )
     }
 
@@ -649,11 +718,28 @@ public struct ObjectDiff: Sendable {
     /// Destructive SQL that drops columns, constraints, or indexes from the target.
     /// These are separated so that the SyncOrchestrator can gate them behind safety flags.
     public let dropColumnSQL: [String]
+    /// Reverse of migrationSQL — undoes the safe changes.
+    public let reverseMigrationSQL: [String]
+    /// Reverse of dropColumnSQL — re-adds dropped columns/constraints/indexes.
+    public let reverseDropColumnSQL: [String]
+    /// Changes that cannot be reversed (e.g. enum value additions).
+    public let irreversibleChanges: [String]
 
-    public init(id: ObjectIdentifier, differences: [String], migrationSQL: [String], dropColumnSQL: [String] = []) {
+    public init(
+        id: ObjectIdentifier,
+        differences: [String],
+        migrationSQL: [String],
+        dropColumnSQL: [String] = [],
+        reverseMigrationSQL: [String] = [],
+        reverseDropColumnSQL: [String] = [],
+        irreversibleChanges: [String] = []
+    ) {
         self.id = id
         self.differences = differences
         self.migrationSQL = migrationSQL
         self.dropColumnSQL = dropColumnSQL
+        self.reverseMigrationSQL = reverseMigrationSQL
+        self.reverseDropColumnSQL = reverseDropColumnSQL
+        self.irreversibleChanges = irreversibleChanges
     }
 }

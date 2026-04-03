@@ -18,6 +18,8 @@ Selectively clone PostgreSQL database objects between clusters. Copy tables, vie
 - **Partitioned tables** — Automatically clones parent tables with their partitions and bound specs
 - **Row-Level Security** — Optionally clone RLS policies and enable RLS on target tables
 - **Retry with rollback** — Transaction-wrapped execution with configurable retry and exponential backoff
+- **Schema migrations** — Generate, apply, rollback, and track versioned migrations with UP/DOWN SQL, checksum verification, and irreversible change detection
+- **Migration tracking** — Record applied migrations in a configurable PostgreSQL tracking table with rollback support
 - **Shell completions** — Built-in completion scripts for bash, zsh, and fish
 
 ## Quick Start

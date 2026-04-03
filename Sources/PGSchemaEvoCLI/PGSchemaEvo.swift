@@ -16,12 +16,13 @@ struct PGSchemaEvo: AsyncParsableCommand {
               pg-schema-evo --generate-completion-script zsh > ~/.zfunc/_pg-schema-evo
               pg-schema-evo --generate-completion-script fish > ~/.config/fish/completions/pg-schema-evo.fish
             """,
-        version: "0.2.0",
+        version: "0.5.0",
         subcommands: [
             CloneCommand.self,
             SyncCommand.self,
             DataSyncCommand.self,
             DiffCommand.self,
+            MigrateCommand.self,
             CheckCommand.self,
             InspectCommand.self,
             ListCommand.self,

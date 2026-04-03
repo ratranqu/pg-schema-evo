@@ -40,6 +40,15 @@ public enum PGSchemaEvoError: Error, LocalizedError, Sendable {
     case invalidObjectSpec(String)
     case invalidDSN(String)
 
+    // Migration
+    case migrationFileNotFound(path: String)
+    case migrationParseError(path: String, underlying: String)
+    case migrationAlreadyApplied(id: String)
+    case migrationNotApplied(id: String)
+    case migrationChecksumMismatch(id: String, expected: String, actual: String)
+    case migrationHasIrreversibleChanges(id: String, changes: [String])
+    case migrationDirectoryNotFound(path: String)
+
     public var errorDescription: String? {
         switch self {
         case .connectionFailed(let endpoint, let underlying):
@@ -82,6 +91,20 @@ public enum PGSchemaEvoError: Error, LocalizedError, Sendable {
             "Invalid object specifier: \(message)"
         case .invalidDSN(let message):
             "Invalid DSN: \(message)"
+        case .migrationFileNotFound(let path):
+            "Migration file not found: \(path)"
+        case .migrationParseError(let path, let underlying):
+            "Failed to parse migration '\(path)': \(underlying)"
+        case .migrationAlreadyApplied(let id):
+            "Migration '\(id)' has already been applied"
+        case .migrationNotApplied(let id):
+            "Migration '\(id)' has not been applied"
+        case .migrationChecksumMismatch(let id, let expected, let actual):
+            "Migration '\(id)' checksum mismatch: expected \(expected.prefix(12))..., got \(actual.prefix(12))..."
+        case .migrationHasIrreversibleChanges(let id, let changes):
+            "Migration '\(id)' contains irreversible changes:\n\(changes.map { "  - \($0)" }.joined(separator: "\n"))"
+        case .migrationDirectoryNotFound(let path):
+            "Migration directory not found: \(path)"
         }
     }
 }
