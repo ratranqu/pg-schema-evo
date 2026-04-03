@@ -55,7 +55,7 @@ struct OrchestratorIntegrationTests {
         let script = try await orchestrator.execute(job: job)
 
         #expect(script.contains("CREATE TABLE"))
-        #expect(script.contains("COPY"))
+        #expect(script.contains("copy"))
     }
 
     @Test("Clone orchestrator dry-run with enum")
@@ -313,7 +313,7 @@ struct OrchestratorIntegrationTests {
         let script = try await orchestrator.execute(job: job)
 
         #expect(script.contains("CREATE TABLE"))
-        #expect(script.contains("COPY"))
+        #expect(script.contains("copy"))
     }
 
     @Test("Clone orchestrator dry-run with global row limit")
@@ -338,7 +338,7 @@ struct OrchestratorIntegrationTests {
         let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
         let script = try await orchestrator.execute(job: job)
 
-        #expect(script.contains("COPY"))
+        #expect(script.contains("copy"))
     }
 
     // MARK: - SyncOrchestrator dry-run tests
@@ -636,6 +636,6 @@ struct OrchestratorIntegrationTests {
         let script = try await orchestrator.execute(job: job)
 
         #expect(script.contains("CREATE TABLE"))
-        #expect(script.contains("COPY"))
+        #expect(script.contains("copy"))
     }
 }

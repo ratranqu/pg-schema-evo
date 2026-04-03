@@ -205,7 +205,6 @@ CREATE POLICY users_self_access ON public.users
 CREATE POLICY users_admin_all ON public.users
     AS PERMISSIVE
     FOR ALL
-    TO postgres
     USING (true)
     WITH CHECK (true);
 
