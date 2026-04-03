@@ -161,7 +161,7 @@ struct CoverageBoostIntegrationTests {
             target: targetConfig,
             objects: [
                 ObjectSpec(
-                    id: ObjectIdentifier(type: .procedure, schema: "public", name: "reset_order_totals", signature: "()")
+                    id: ObjectIdentifier(type: .procedure, schema: "public", name: "reset_order_totals")
                 ),
             ],
             dryRun: true,
@@ -410,7 +410,7 @@ struct CoverageBoostIntegrationTests {
             source: sourceConfig,
             target: targetConfig,
             objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .procedure, schema: "public", name: "nonexistent_proc", signature: "()"))
+                ObjectSpec(id: ObjectIdentifier(type: .procedure, schema: "public", name: "nonexistent_proc"))
             ],
             dryRun: true,
             skipPreflight: false
@@ -569,7 +569,8 @@ struct CoverageBoostIntegrationTests {
         try? await sourceConn.close()
         try? await targetConn.close()
 
-        let funcId = ObjectIdentifier(type: .function, schema: Self.testSchema, name: "sync_func_test", signature: "()")
+        // No-arg functions have nil signature in PG catalog (pg_get_function_identity_arguments returns '')
+        let funcId = ObjectIdentifier(type: .function, schema: Self.testSchema, name: "sync_func_test")
         let syncJob = SyncJob(
             source: sourceConfig,
             target: targetConfig,
