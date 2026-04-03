@@ -146,6 +146,7 @@ RLS policies can be optionally cloned (`--rls` flag or `rls: true` in YAML). The
 | 8 | Incremental data sync (`data-sync` command) — timestamp/ID-based change detection, UPSERT via temp tables, optional delete detection, YAML state file |
 | 9 | Performance — connection pooling, parallel data transfer with dependency-aware scheduling, streaming COPY (no temp files), batched introspection queries, configurable `--parallel` concurrency with auto-detect |
 | 10 | Schema migration (`migrate` command) — generate, apply, rollback, status subcommands; paired YAML metadata + SQL files with UP/DOWN/CUSTOM/DATA sections; reverse SQL generation; checksum verification; migration tracking table (`_pg_schema_evo_migrations`) |
+| 11 | Data masking (`DataMasking` library + `mask` command) — standalone pure-Swift module with 8 built-in strategies (hash, fake, redact, partial, null, preserve-format, regex, numeric-noise), extensible registry, value parsers via swift-parsing, DSL expression language, YAML/programmatic config, benchmark suite |
 
 ### Future Work
 
@@ -156,7 +157,6 @@ RLS policies can be optionally cloned (`--rls` flag or `rls: true` in YAML). The
 | Scheduled sync | Watch for schema changes and auto-sync on a schedule or continuously |
 | Multi-schema/multi-database | Batch operations across multiple schemas and databases |
 | Plugin/hook system | Pre/post-clone hooks for custom transformations |
-| Data masking | Mask or anonymize sensitive data during cloning |
 | Web UI/dashboard | Visual interface for managing clone jobs and monitoring operations |
 
 ## Subcommands

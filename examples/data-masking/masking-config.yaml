@@ -1,0 +1,122 @@
+# =============================================================
+# Data Masking Configuration — Coffee Shop Loyalty Program
+# =============================================================
+#
+# This config anonymizes a production loyalty database for safe
+# use in development, analytics, or sharing with third parties.
+#
+# Goals:
+#   1. Remove all PII (names, emails, phones, addresses, SSNs)
+#   2. Obfuscate purchase counts and point totals so individual
+#      buying habits can't be reverse-engineered
+#   3. Preserve referential integrity (hashed IDs match across
+#      tables via deterministic hashing)
+#   4. Keep non-sensitive data intact (store names, item names,
+#      timestamps, tier labels)
+# =============================================================
+
+rules:
+  # ---------------------------------------------------------
+  # Customer PII — full anonymization
+  # ---------------------------------------------------------
+  - table: customers
+    columns:
+      first_name:
+        strategy: fake
+        options:
+          type: first_name
+      last_name:
+        strategy: fake
+        options:
+          type: last_name
+      email:
+        # Hash the local part, keep the domain structure
+        # alice.johnson@gmail.com → a]3f9e2c@gmail.com
+        strategy: dsl
+        expression: 'hash(email.local) + "@" + email.domain'
+      phone:
+        # Keep area code visible, mask the rest
+        # 503-555-0101 → 503-***-****
+        strategy: partial
+        options:
+          type: phone
+      address:
+        strategy: fake
+        options:
+          type: address
+      city:
+        strategy: fake
+        options:
+          type: city
+      zip_code:
+        # Randomize digits but keep format (5 digits)
+        strategy: preserve-format
+      ssn:
+        # Completely redact — this is the most sensitive field
+        strategy: redact
+        options:
+          value: "XXX-XX-XXXX"
+
+  # ---------------------------------------------------------
+  # Purchase amounts and counts — obfuscate to prevent
+  # identifying individuals by their buying patterns
+  # ---------------------------------------------------------
+  - table: purchases
+    columns:
+      amount:
+        # Add ±15% noise so totals can't identify people
+        strategy: numeric-noise
+        options:
+          noise: "0.15"
+      points_earned:
+        strategy: numeric-noise
+        options:
+          noise: "0.15"
+      item_count:
+        # Small noise on item counts
+        strategy: numeric-noise
+        options:
+          noise: "0.10"
+
+  # ---------------------------------------------------------
+  # Points balances — obfuscate totals
+  # ---------------------------------------------------------
+  - table: points_balance
+    columns:
+      total_points:
+        strategy: numeric-noise
+        options:
+          noise: "0.20"
+      lifetime_points:
+        strategy: numeric-noise
+        options:
+          noise: "0.20"
+
+  # ---------------------------------------------------------
+  # Redemptions — obfuscate point values
+  # ---------------------------------------------------------
+  - table: redemptions
+    columns:
+      points_spent:
+        strategy: numeric-noise
+        options:
+          noise: "0.15"
+
+  # ---------------------------------------------------------
+  # Catch-all: any column named "email" in any table
+  # ---------------------------------------------------------
+  - pattern: "*.email"
+    strategy: hash
+
+  # ---------------------------------------------------------
+  # Catch-all: any column named "ssn" in any table
+  # ---------------------------------------------------------
+  - pattern: "*.ssn"
+    strategy: redact
+    options:
+      value: "XXX-XX-XXXX"
+
+# Global settings
+defaults:
+  seed: 20260403
+  locale: en
