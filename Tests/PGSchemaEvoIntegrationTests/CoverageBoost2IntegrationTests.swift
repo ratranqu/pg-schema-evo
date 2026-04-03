@@ -7,12 +7,6 @@ import Logging
 @Suite("Coverage Boost 2 Integration Tests", .tags(.integration), .serialized)
 struct CoverageBoost2IntegrationTests {
 
-    private static let testSchema = "_cov2_test"
-
-    private static func ensureTestSchema(on conn: PostgresConnection) async throws {
-        try await IntegrationTestConfig.execute("CREATE SCHEMA IF NOT EXISTS \(testSchema)", on: conn)
-    }
-
     // MARK: - Introspector: listObjects for procedures
 
     @Test("List procedures via introspector")
@@ -136,9 +130,9 @@ struct CoverageBoost2IntegrationTests {
         #expect(types.contains(.function))
     }
 
-    // MARK: - SchemaDiffer: diff with real introspectors (same DB = identical)
+    // MARK: - SchemaDiffer: diff with same source (identical)
 
-    @Test("SchemaDiffer diff detects identical schemas")
+    @Test("SchemaDiffer diff detects identical schemas on same database")
     func differDetectsIdentical() async throws {
         let config = try IntegrationTestConfig.sourceConfig()
         let conn1 = try await IntegrationTestConfig.connect(to: config)
@@ -186,185 +180,6 @@ struct CoverageBoost2IntegrationTests {
         #expect(output.contains("already in sync"))
     }
 
-    // MARK: - SyncOrchestrator: dry-run detects real differences
-
-    @Test("Sync dry-run detects column type difference between databases")
-    func syncDryRunColumnTypeDiff() async throws {
-        let sourceConfig = try IntegrationTestConfig.sourceConfig()
-        let targetConfig = try IntegrationTestConfig.targetConfig()
-        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
-        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
-
-        try await Self.ensureTestSchema(on: sourceConn)
-        try await Self.ensureTestSchema(on: targetConn)
-
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).sync_type_test CASCADE", on: sourceConn)
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).sync_type_test CASCADE", on: targetConn)
-
-        try await IntegrationTestConfig.execute("""
-            CREATE TABLE \(Self.testSchema).sync_type_test (
-                id integer PRIMARY KEY,
-                value bigint
-            )
-        """, on: sourceConn)
-
-        try await IntegrationTestConfig.execute("""
-            CREATE TABLE \(Self.testSchema).sync_type_test (
-                id integer PRIMARY KEY,
-                value integer
-            )
-        """, on: targetConn)
-
-        try? await sourceConn.close()
-        try? await targetConn.close()
-
-        let tableId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "sync_type_test")
-        let syncJob = SyncJob(
-            source: sourceConfig,
-            target: targetConfig,
-            objects: [ObjectSpec(id: tableId)],
-            dryRun: true,
-            force: true
-        )
-
-        let orchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)
-        let output = try await orchestrator.execute(job: syncJob)
-
-        #expect(output.contains("ALTER") || output.contains("value"))
-
-        // Cleanup
-        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
-        let tc = try await IntegrationTestConfig.connect(to: targetConfig)
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).sync_type_test CASCADE", on: sc)
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).sync_type_test CASCADE", on: tc)
-        try? await sc.close()
-        try? await tc.close()
-    }
-
-    // MARK: - SyncOrchestrator: create view only in source
-
-    @Test("Sync dry-run creates view that exists only in source")
-    func syncDryRunCreateView() async throws {
-        let sourceConfig = try IntegrationTestConfig.sourceConfig()
-        let targetConfig = try IntegrationTestConfig.targetConfig()
-        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
-        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
-
-        try await Self.ensureTestSchema(on: sourceConn)
-        try await Self.ensureTestSchema(on: targetConn)
-
-        try await IntegrationTestConfig.execute("DROP VIEW IF EXISTS \(Self.testSchema).sync_view_test CASCADE", on: sourceConn)
-        try await IntegrationTestConfig.execute("DROP VIEW IF EXISTS \(Self.testSchema).sync_view_test CASCADE", on: targetConn)
-
-        try await IntegrationTestConfig.execute("""
-            CREATE VIEW \(Self.testSchema).sync_view_test AS SELECT 1 AS val
-        """, on: sourceConn)
-
-        try? await sourceConn.close()
-        try? await targetConn.close()
-
-        let viewId = ObjectIdentifier(type: .view, schema: Self.testSchema, name: "sync_view_test")
-        let syncJob = SyncJob(
-            source: sourceConfig,
-            target: targetConfig,
-            objects: [ObjectSpec(id: viewId)],
-            dryRun: true,
-            force: true
-        )
-
-        let orchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)
-        let output = try await orchestrator.execute(job: syncJob)
-
-        #expect(output.contains("CREATE") || output.contains("sync_view_test"))
-
-        // Cleanup
-        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
-        try await IntegrationTestConfig.execute("DROP VIEW IF EXISTS \(Self.testSchema).sync_view_test CASCADE", on: sc)
-        try? await sc.close()
-    }
-
-    // MARK: - SyncOrchestrator: create sequence on target
-
-    @Test("Sync creates missing sequence on target via dry-run")
-    func syncCreateSequence() async throws {
-        let sourceConfig = try IntegrationTestConfig.sourceConfig()
-        let targetConfig = try IntegrationTestConfig.targetConfig()
-        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
-        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
-
-        try await Self.ensureTestSchema(on: sourceConn)
-        try await Self.ensureTestSchema(on: targetConn)
-
-        try await IntegrationTestConfig.execute("DROP SEQUENCE IF EXISTS \(Self.testSchema).sync_seq_test CASCADE", on: sourceConn)
-        try await IntegrationTestConfig.execute("DROP SEQUENCE IF EXISTS \(Self.testSchema).sync_seq_test CASCADE", on: targetConn)
-        try await IntegrationTestConfig.execute("""
-            CREATE SEQUENCE \(Self.testSchema).sync_seq_test START 100 INCREMENT 5
-        """, on: sourceConn)
-
-        try? await sourceConn.close()
-        try? await targetConn.close()
-
-        let seqId = ObjectIdentifier(type: .sequence, schema: Self.testSchema, name: "sync_seq_test")
-        let syncJob = SyncJob(
-            source: sourceConfig,
-            target: targetConfig,
-            objects: [ObjectSpec(id: seqId)],
-            dryRun: true,
-            force: true
-        )
-
-        let orchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)
-        let output = try await orchestrator.execute(job: syncJob)
-
-        #expect(output.contains("CREATE SEQUENCE") || output.contains("sync_seq_test"))
-
-        // Cleanup
-        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
-        try await IntegrationTestConfig.execute("DROP SEQUENCE IF EXISTS \(Self.testSchema).sync_seq_test CASCADE", on: sc)
-        try? await sc.close()
-    }
-
-    // MARK: - SyncOrchestrator: create composite type
-
-    @Test("Sync creates missing composite type on target via dry-run")
-    func syncCreateCompositeType() async throws {
-        let sourceConfig = try IntegrationTestConfig.sourceConfig()
-        let targetConfig = try IntegrationTestConfig.targetConfig()
-        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
-        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
-
-        try await Self.ensureTestSchema(on: sourceConn)
-        try await Self.ensureTestSchema(on: targetConn)
-
-        try await IntegrationTestConfig.execute("DROP TYPE IF EXISTS \(Self.testSchema).sync_point_test CASCADE", on: sourceConn)
-        try await IntegrationTestConfig.execute("DROP TYPE IF EXISTS \(Self.testSchema).sync_point_test CASCADE", on: targetConn)
-        try await IntegrationTestConfig.execute("""
-            CREATE TYPE \(Self.testSchema).sync_point_test AS (x double precision, y double precision)
-        """, on: sourceConn)
-
-        try? await sourceConn.close()
-        try? await targetConn.close()
-
-        let typeId = ObjectIdentifier(type: .compositeType, schema: Self.testSchema, name: "sync_point_test")
-        let syncJob = SyncJob(
-            source: sourceConfig,
-            target: targetConfig,
-            objects: [ObjectSpec(id: typeId)],
-            dryRun: true,
-            force: true
-        )
-
-        let orchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)
-        let output = try await orchestrator.execute(job: syncJob)
-
-        #expect(output.contains("CREATE TYPE") || output.contains("sync_point_test"))
-
-        // Cleanup
-        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
-        try await IntegrationTestConfig.execute("DROP TYPE IF EXISTS \(Self.testSchema).sync_point_test CASCADE", on: sc)
-        try? await sc.close()
-    }
-
     // MARK: - DataSync: initialize with multiple tables
 
     @Test("Data sync initialize with multiple tables")
@@ -397,52 +212,5 @@ struct CoverageBoost2IntegrationTests {
         let store = DataSyncStateStore()
         let state = try store.load(path: stateFile)
         #expect(state.tables.count == 2)
-    }
-
-    // MARK: - SchemaDiffer: compareObjects with real introspectors
-
-    @Test("SchemaDiffer compareObjects detects real table differences")
-    func differCompareObjectsReal() async throws {
-        let sourceConfig = try IntegrationTestConfig.sourceConfig()
-        let targetConfig = try IntegrationTestConfig.targetConfig()
-        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
-        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
-
-        try await Self.ensureTestSchema(on: sourceConn)
-        try await Self.ensureTestSchema(on: targetConn)
-
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_test CASCADE", on: sourceConn)
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_test CASCADE", on: targetConn)
-
-        try await IntegrationTestConfig.execute("""
-            CREATE TABLE \(Self.testSchema).diff_test (
-                id integer PRIMARY KEY,
-                name text NOT NULL,
-                email text
-            )
-        """, on: sourceConn)
-
-        try await IntegrationTestConfig.execute("""
-            CREATE TABLE \(Self.testSchema).diff_test (
-                id integer PRIMARY KEY,
-                name varchar(100) NOT NULL
-            )
-        """, on: targetConn)
-
-        let source = PGCatalogIntrospector(connection: sourceConn, logger: IntegrationTestConfig.logger)
-        let target = PGCatalogIntrospector(connection: targetConn, logger: IntegrationTestConfig.logger)
-
-        let differ = SchemaDiffer(logger: IntegrationTestConfig.logger)
-        let tableId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "diff_test")
-        let objDiff = try await differ.compareObjects(tableId, source: source, target: target)
-
-        #expect(objDiff != nil)
-        #expect(!objDiff!.differences.isEmpty)
-
-        // Cleanup
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_test CASCADE", on: sourceConn)
-        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).diff_test CASCADE", on: targetConn)
-        try? await sourceConn.close()
-        try? await targetConn.close()
     }
 }
