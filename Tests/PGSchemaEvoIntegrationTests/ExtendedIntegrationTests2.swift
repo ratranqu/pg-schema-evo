@@ -13,6 +13,11 @@ struct ExtendedIntegrationTests2 {
         try await IntegrationTestConfig.execute("CREATE SCHEMA IF NOT EXISTS \(testSchema)", on: conn)
     }
 
+    private static func cleanTestSchema(on conn: PostgresConnection) async throws {
+        try await IntegrationTestConfig.execute("DROP SCHEMA IF EXISTS \(testSchema) CASCADE", on: conn)
+        try await IntegrationTestConfig.execute("CREATE SCHEMA \(testSchema)", on: conn)
+    }
+
     // MARK: - Constraint Diff & ALTER Generation
 
     @Test("Diff detects added and removed indexes between source and target")
@@ -164,6 +169,135 @@ struct ExtendedIntegrationTests2 {
         try? await targetConn.close()
     }
 
+    // MARK: - View-on-View Dependency (Cascade Clone)
+
+    @Test("Dry-run clone with cascade resolves view-on-view dependencies")
+    func cloneCascadeViewDependencies() async throws {
+        let sourceConfig = try IntegrationTestConfig.sourceConfig()
+        let targetConfig = try IntegrationTestConfig.targetConfig()
+        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
+
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await IntegrationTestConfig.execute("DROP VIEW IF EXISTS \(Self.testSchema).top_view CASCADE", on: sourceConn)
+        try await IntegrationTestConfig.execute("DROP VIEW IF EXISTS \(Self.testSchema).base_view CASCADE", on: sourceConn)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).base_tbl CASCADE", on: sourceConn)
+
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).base_tbl (id integer PRIMARY KEY, name text, active boolean DEFAULT true)
+        """, on: sourceConn)
+        try await IntegrationTestConfig.execute("""
+            CREATE VIEW \(Self.testSchema).base_view AS SELECT id, name FROM \(Self.testSchema).base_tbl WHERE active = true
+        """, on: sourceConn)
+        try await IntegrationTestConfig.execute("""
+            CREATE VIEW \(Self.testSchema).top_view AS SELECT * FROM \(Self.testSchema).base_view WHERE id > 0
+        """, on: sourceConn)
+
+        try? await sourceConn.close()
+
+        // Clone top_view with cascade — should pull in base_view and base_tbl
+        let job = CloneJob(
+            source: sourceConfig,
+            target: targetConfig,
+            objects: [
+                ObjectSpec(
+                    id: ObjectIdentifier(type: .view, schema: Self.testSchema, name: "top_view"),
+                    cascadeDependencies: true
+                ),
+            ],
+            dryRun: true,
+            dropIfExists: true
+        )
+
+        let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
+        let script = try await orchestrator.execute(job: job)
+
+        // Script should contain all three objects in dependency order
+        #expect(script.contains("base_tbl"), "Cascade should include base table")
+        #expect(script.contains("base_view"), "Cascade should include intermediate view")
+        #expect(script.contains("top_view"), "Cascade should include requested view")
+
+        // Verify order: base_tbl before base_view, base_view before top_view
+        if let tblIdx = script.range(of: "base_tbl")?.lowerBound,
+           let bvIdx = script.range(of: "base_view")?.lowerBound,
+           let tvIdx = script.range(of: "top_view")?.lowerBound {
+            #expect(tblIdx < bvIdx, "base_tbl should appear before base_view")
+            #expect(bvIdx < tvIdx, "base_view should appear before top_view")
+        }
+
+        // Clean up
+        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
+        try await IntegrationTestConfig.execute("DROP VIEW IF EXISTS \(Self.testSchema).top_view CASCADE", on: sc)
+        try await IntegrationTestConfig.execute("DROP VIEW IF EXISTS \(Self.testSchema).base_view CASCADE", on: sc)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).base_tbl CASCADE", on: sc)
+        try? await sc.close()
+    }
+
+    // MARK: - Env Var Interpolation in Config
+
+    @Test("Config loader interpolates environment variables in YAML")
+    func configEnvVarInterpolation() async throws {
+        let tmpDir = NSTemporaryDirectory()
+        let configPath = tmpDir + "test-env-config-\(UUID().uuidString).yaml"
+
+        // The DSN env vars are already set in the test environment
+        let yaml = """
+        source:
+          dsn: "${SOURCE_DSN:-\(IntegrationTestConfig.sourceDSN)}"
+        target:
+          dsn: "${TARGET_DSN:-\(IntegrationTestConfig.targetDSN)}"
+        objects:
+          - type: table
+            schema: public
+            name: products
+        """
+        try yaml.write(toFile: configPath, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: configPath) }
+
+        let loader = ConfigLoader()
+        let config = try loader.load(path: configPath)
+
+        // Should resolve env var or use default
+        #expect(config.objects.count == 1)
+        #expect(config.objects[0].id.name == "products")
+
+        // Verify the parsed DSN connects to a real database
+        let baseJob = config.toCloneJob()
+        let cloneJob = CloneJob(
+            source: baseJob.source,
+            target: baseJob.target,
+            objects: baseJob.objects,
+            dryRun: true,
+            parallel: baseJob.parallel
+        )
+
+        let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
+        let script = try await orchestrator.execute(job: cloneJob)
+        #expect(script.contains("products"), "Dry-run should produce script with interpolated DSN")
+    }
+
+    @Test("Config loader throws on undefined env var without default")
+    func configUndefinedEnvVar() async throws {
+        let tmpDir = NSTemporaryDirectory()
+        let configPath = tmpDir + "test-undef-env-\(UUID().uuidString).yaml"
+        let yaml = """
+        source:
+          dsn: "${TOTALLY_UNDEFINED_VAR_XYZ_12345}"
+        target:
+          dsn: "postgresql://localhost/test"
+        objects:
+          - type: table
+            schema: public
+            name: foo
+        """
+        try yaml.write(toFile: configPath, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: configPath) }
+
+        let loader = ConfigLoader()
+        #expect(throws: PGSchemaEvoError.self) {
+            _ = try loader.load(path: configPath)
+        }
+    }
+
     // MARK: - PL/pgSQL Function Introspection
 
     @Test("Introspect PL/pgSQL function preserves body with exception handling")
@@ -203,6 +337,61 @@ struct ExtendedIntegrationTests2 {
 
         try await IntegrationTestConfig.execute("DROP FUNCTION IF EXISTS \(Self.testSchema).complex_func(integer, text) CASCADE", on: sourceConn)
         try? await sourceConn.close()
+    }
+
+    // MARK: - SyncAll Mode with Full Schema Diff
+
+    @Test("SyncAll mode detects all differences in a schema")
+    func syncAllSchemaMode() async throws {
+        let sourceConfig = try IntegrationTestConfig.sourceConfig()
+        let targetConfig = try IntegrationTestConfig.targetConfig()
+        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
+
+        try await Self.cleanTestSchema(on: sourceConn)
+        try await Self.cleanTestSchema(on: targetConn)
+
+        // Source: two tables. Target: one matching, one missing
+        for conn in [sourceConn, targetConn] {
+            try await IntegrationTestConfig.execute("""
+                CREATE TABLE \(Self.testSchema).shared_tbl (id integer PRIMARY KEY, name text)
+            """, on: conn)
+        }
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).source_only_tbl (id integer PRIMARY KEY, value numeric)
+        """, on: sourceConn)
+
+        try? await sourceConn.close()
+        try? await targetConn.close()
+
+        // Use syncAll to detect all differences for tables in the schema
+        let sharedId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "shared_tbl")
+        let sourceOnlyId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "source_only_tbl")
+        let syncJob = SyncJob(
+            source: sourceConfig,
+            target: targetConfig,
+            objects: [
+                ObjectSpec(id: sharedId),
+                ObjectSpec(id: sourceOnlyId),
+            ],
+            dryRun: true,
+            syncAll: true
+        )
+
+        let syncOrchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)
+        let script = try await syncOrchestrator.execute(job: syncJob)
+
+        // Should generate CREATE for source_only_tbl
+        #expect(script.contains("source_only_tbl"), "SyncAll should detect missing table")
+        #expect(script.contains("CREATE TABLE"), "SyncAll should generate CREATE for missing table")
+
+        // Clean up
+        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let tc = try await IntegrationTestConfig.connect(to: targetConfig)
+        try await Self.cleanTestSchema(on: sc)
+        try await Self.cleanTestSchema(on: tc)
+        try? await sc.close()
+        try? await tc.close()
     }
 
     // MARK: - Enum Ordering Preservation
@@ -372,4 +561,40 @@ struct ExtendedIntegrationTests2 {
         try? await sourceConn.close()
     }
 
+    // MARK: - Multiple Object Types in Single Clone
+
+    @Test("Dry-run clone of mixed object types produces valid script")
+    func cloneMixedObjectTypes() async throws {
+        let sourceConfig = try IntegrationTestConfig.sourceConfig()
+        let targetConfig = try IntegrationTestConfig.targetConfig()
+
+        // Clone multiple object types from the seeded source database
+        let job = CloneJob(
+            source: sourceConfig,
+            target: targetConfig,
+            objects: [
+                ObjectSpec(id: ObjectIdentifier(type: .enum, schema: "public", name: "order_status")),
+                ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: "products")),
+                ObjectSpec(id: ObjectIdentifier(type: .sequence, schema: "public", name: "invoice_number_seq")),
+                ObjectSpec(id: ObjectIdentifier(type: .view, schema: "public", name: "active_users")),
+            ],
+            dryRun: true,
+            dropIfExists: true
+        )
+
+        let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
+        let script = try await orchestrator.execute(job: job)
+
+        // All object types should appear in the script
+        #expect(script.contains("order_status"), "Script should contain enum")
+        #expect(script.contains("products"), "Script should contain table")
+        #expect(script.contains("invoice_number_seq"), "Script should contain sequence")
+        #expect(script.contains("active_users"), "Script should contain view")
+
+        // Enum should come before table (type ordering)
+        if let enumIdx = script.range(of: "order_status")?.lowerBound,
+           let tableIdx = script.range(of: "CREATE TABLE")?.lowerBound {
+            #expect(enumIdx < tableIdx, "Enum should be created before table")
+        }
+    }
 }
