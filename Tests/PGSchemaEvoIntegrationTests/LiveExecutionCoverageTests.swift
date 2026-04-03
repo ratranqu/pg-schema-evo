@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 import PostgresNIO
 import Logging
 @testable import PGSchemaEvoCore
@@ -1839,5 +1840,23 @@ struct LiveExecutionCoverageTests {
         // Verify script contains data copy references
         #expect(script.contains("orders"), "Script should reference orders table")
         #expect(script.contains("users"), "Script should include cascaded users dependency")
+    }
+
+    // MARK: - Migration rollback with no applied migrations
+
+    @Test("Rollback with no applied migrations returns empty")
+    func rollbackNoApplied() async throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("mig_rollback_\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
+
+        let config = MigrationConfig(directory: tmpDir)
+        let applicator = MigrationApplicator(config: config, logger: IntegrationTestConfig.logger)
+        let sourceConfig = try IntegrationTestConfig.sourceConfig()
+
+        let rolledBack = try await applicator.rollback(
+            targetDSN: sourceConfig.toDSN()
+        )
+        #expect(rolledBack.isEmpty)
     }
 }

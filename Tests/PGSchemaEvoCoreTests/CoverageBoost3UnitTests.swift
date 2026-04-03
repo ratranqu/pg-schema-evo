@@ -590,19 +590,4 @@ struct MigrationApplicatorUnitTests {
         #expect(applied.isEmpty)
     }
 
-    @Test("Rollback with no applied migrations returns empty")
-    func rollbackNoApplied() async throws {
-        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("mig_rollback_\(UUID().uuidString)").path
-        try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
-
-        let config = MigrationConfig(directory: tmpDir)
-        let applicator = MigrationApplicator(config: config, logger: Logger(label: "test"))
-
-        // This should hit lines 145-147 (no applied migrations to rollback)
-        let rolledBack = try await applicator.rollback(
-            targetDSN: "postgresql://testuser:testpass@localhost:15432/source_db"
-        )
-        #expect(rolledBack.isEmpty)
-    }
 }
