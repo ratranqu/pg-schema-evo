@@ -1351,6 +1351,256 @@ struct SchemaDifferTests {
         #expect(sqlDestructive.contains("DROP TABLE IF EXISTS"))
         #expect(!sqlDestructive.contains("-- DROP TABLE IF EXISTS"))
     }
+
+    // MARK: - compareObjects public method
+
+    @Test("compareObjects returns diff for different views")
+    func compareObjectsView() async throws {
+        let viewId = ObjectIdentifier(type: .view, schema: "public", name: "v1")
+        let source = ConfigurableDiffIntrospector(objects: [viewId])
+        source.views[viewId] = ViewMetadata(id: viewId, definition: "SELECT 1 AS a")
+        let target = ConfigurableDiffIntrospector(objects: [viewId])
+        target.views[viewId] = ViewMetadata(id: viewId, definition: "SELECT 2 AS a")
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let objDiff = try await differ.compareObjects(viewId, source: source, target: target)
+
+        #expect(objDiff != nil)
+        #expect(objDiff!.differences.contains { $0.contains("Definition differs") })
+        #expect(objDiff!.migrationSQL.contains { $0.contains("CREATE OR REPLACE VIEW") })
+    }
+
+    @Test("compareObjects returns nil for identical functions")
+    func compareObjectsIdenticalFunction() async throws {
+        let funcId = ObjectIdentifier(type: .function, schema: "public", name: "add_nums")
+        let source = ConfigurableDiffIntrospector(objects: [funcId])
+        source.functions[funcId] = FunctionMetadata(id: funcId, definition: "CREATE FUNCTION add_nums() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql")
+        let target = ConfigurableDiffIntrospector(objects: [funcId])
+        target.functions[funcId] = FunctionMetadata(id: funcId, definition: "CREATE FUNCTION add_nums() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql")
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let objDiff = try await differ.compareObjects(funcId, source: source, target: target)
+
+        #expect(objDiff == nil)
+    }
+
+    @Test("compareObjects returns nil for unsupported type")
+    func compareObjectsUnsupported() async throws {
+        let fdwId = ObjectIdentifier(type: .foreignDataWrapper, name: "postgres_fdw")
+        let source = ConfigurableDiffIntrospector(objects: [fdwId])
+        let target = ConfigurableDiffIntrospector(objects: [fdwId])
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let objDiff = try await differ.compareObjects(fdwId, source: source, target: target)
+
+        #expect(objDiff == nil)
+    }
+
+    // MARK: - Enum extra label in target
+
+    @Test("Enum extra label in target noted as cannot remove")
+    func enumExtraLabelInTarget() async throws {
+        let enumId = ObjectIdentifier(type: .enum, schema: "public", name: "status")
+        let source = ConfigurableDiffIntrospector(objects: [enumId])
+        source.enums[enumId] = EnumMetadata(id: enumId, labels: ["active", "inactive"])
+        let target = ConfigurableDiffIntrospector(objects: [enumId])
+        target.enums[enumId] = EnumMetadata(id: enumId, labels: ["active", "inactive", "deleted"])
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].differences.contains { $0.contains("deleted") && $0.contains("extra in target") })
+    }
+
+    // MARK: - RLS forced on target but not source
+
+    @Test("RLS forced on target but not source generates NO FORCE in dropColumnSQL")
+    func rlsNoForceOnSource() async throws {
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "secrets")
+        let source = ConfigurableDiffIntrospector(objects: [tableId])
+        source.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)]
+        )
+        source.rlsInfos[tableId] = RLSInfo(isEnabled: true, isForced: false)
+
+        let target = ConfigurableDiffIntrospector(objects: [tableId])
+        target.tables[tableId] = TableMetadata(
+            id: tableId,
+            columns: [ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1)]
+        )
+        target.rlsInfos[tableId] = RLSInfo(isEnabled: true, isForced: true)
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].differences.contains { $0.contains("forced on target") })
+        #expect(result.modified[0].dropColumnSQL.contains { $0.contains("NO FORCE ROW LEVEL SECURITY") })
+    }
+
+    // MARK: - Sequence cache size difference
+
+    @Test("Sequence cache size difference generates ALTER SEQUENCE with CACHE")
+    func sequenceCacheSizeDifference() async throws {
+        let seqId = ObjectIdentifier(type: .sequence, schema: "public", name: "fast_seq")
+        let source = ConfigurableDiffIntrospector(objects: [seqId])
+        source.sequences[seqId] = SequenceMetadata(id: seqId, cacheSize: 20)
+        let target = ConfigurableDiffIntrospector(objects: [seqId])
+        target.sequences[seqId] = SequenceMetadata(id: seqId, cacheSize: 1)
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].differences.contains { $0.contains("CACHE") })
+        #expect(result.modified[0].migrationSQL.contains { $0.contains("CACHE 20") })
+    }
+
+    // MARK: - Materialized view compareObjects
+
+    @Test("compareObjects detects materialized view definition change")
+    func compareObjectsMatview() async throws {
+        let matId = ObjectIdentifier(type: .materializedView, schema: "public", name: "mv_report")
+        let source = ConfigurableDiffIntrospector(objects: [matId])
+        source.materializedViews[matId] = MaterializedViewMetadata(id: matId, definition: "SELECT count(*) FROM orders")
+        let target = ConfigurableDiffIntrospector(objects: [matId])
+        target.materializedViews[matId] = MaterializedViewMetadata(id: matId, definition: "SELECT count(*) FROM old_orders")
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let objDiff = try await differ.compareObjects(matId, source: source, target: target)
+
+        #expect(objDiff != nil)
+        #expect(objDiff!.migrationSQL.contains { $0.contains("CREATE OR REPLACE MATERIALIZED VIEW") })
+    }
+
+    // MARK: - Role multiple property changes
+
+    @Test("Role diff detects multiple property changes with ALTER SQL")
+    func roleMultiplePropertyChanges() async throws {
+        let roleId = ObjectIdentifier(type: .role, name: "app_user")
+        let source = ConfigurableDiffIntrospector(objects: [roleId])
+        source.roles[roleId] = RoleMetadata(id: roleId, canLogin: true, canCreateDB: true, connectionLimit: 10)
+        let target = ConfigurableDiffIntrospector(objects: [roleId])
+        target.roles[roleId] = RoleMetadata(id: roleId, canLogin: false, canCreateDB: false, connectionLimit: -1)
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        let sql = result.modified[0].migrationSQL.joined(separator: " ")
+        #expect(sql.contains("LOGIN"))
+        #expect(sql.contains("CREATEDB"))
+        #expect(sql.contains("CONNECTION LIMIT 10"))
+    }
+
+    // MARK: - Role superuser and createrole changes
+
+    @Test("Role diff detects superuser and createrole changes")
+    func roleSuperuserCreateroleChanges() async throws {
+        let roleId = ObjectIdentifier(type: .role, name: "admin")
+        let source = ConfigurableDiffIntrospector(objects: [roleId])
+        source.roles[roleId] = RoleMetadata(id: roleId, isSuperuser: true, canCreateRole: true)
+        let target = ConfigurableDiffIntrospector(objects: [roleId])
+        target.roles[roleId] = RoleMetadata(id: roleId, isSuperuser: false, canCreateRole: false)
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        let sql = result.modified[0].migrationSQL.joined(separator: " ")
+        #expect(sql.contains("SUPERUSER"))
+        #expect(sql.contains("CREATEROLE"))
+    }
+
+    // MARK: - renderText comprehensive output
+
+    @Test("renderText includes modified objects section with differences")
+    func renderTextModifiedSection() async throws {
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "users")
+        let source = ConfigurableDiffIntrospector(objects: [
+            tableId,
+            ObjectIdentifier(type: .table, schema: "public", name: "only_src"),
+        ])
+        source.tables[tableId] = TableMetadata(id: tableId, columns: [
+            ColumnInfo(name: "id", dataType: "bigint", isNullable: false, ordinalPosition: 1),
+        ])
+        let target = ConfigurableDiffIntrospector(objects: [
+            tableId,
+            ObjectIdentifier(type: .table, schema: "public", name: "only_tgt"),
+        ])
+        target.tables[tableId] = TableMetadata(id: tableId, columns: [
+            ColumnInfo(name: "id", dataType: "integer", isNullable: false, ordinalPosition: 1),
+        ])
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+        let text = result.renderText()
+
+        #expect(text.contains("Objects only in source"))
+        #expect(text.contains("Objects only in target"))
+        #expect(text.contains("Modified objects"))
+        #expect(text.contains("~ table:public.users"))
+        #expect(text.contains("Summary:"))
+    }
+
+    // MARK: - Function definition differs
+
+    @Test("Function definition difference generates migration SQL")
+    func functionDiffMigrationSQL() async throws {
+        let funcId = ObjectIdentifier(type: .function, schema: "public", name: "calc")
+        let source = ConfigurableDiffIntrospector(objects: [funcId])
+        source.functions[funcId] = FunctionMetadata(
+            id: funcId,
+            definition: "CREATE OR REPLACE FUNCTION public.calc() RETURNS int AS $$ SELECT 42; $$ LANGUAGE sql"
+        )
+        let target = ConfigurableDiffIntrospector(objects: [funcId])
+        target.functions[funcId] = FunctionMetadata(
+            id: funcId,
+            definition: "CREATE OR REPLACE FUNCTION public.calc() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql"
+        )
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target)
+
+        #expect(result.modified.count == 1)
+        #expect(result.modified[0].migrationSQL.contains { $0.contains("SELECT 42") })
+    }
+
+    // MARK: - diff with schema filter
+
+    @Test("Diff with schema filter only compares objects in that schema")
+    func diffWithSchemaFilter() async throws {
+        let pubTable = ObjectIdentifier(type: .table, schema: "public", name: "t1")
+        let analyTable = ObjectIdentifier(type: .table, schema: "analytics", name: "t2")
+
+        let source = ConfigurableDiffIntrospector(objects: [pubTable, analyTable])
+        let target = ConfigurableDiffIntrospector(objects: [pubTable])
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target, schema: "public")
+
+        // analytics.t2 should be excluded from comparison
+        #expect(result.onlyInSource.isEmpty)
+        #expect(result.matching == 1)
+    }
+
+    @Test("Diff with type filter only compares specified types")
+    func diffWithTypeFilter() async throws {
+        let table = ObjectIdentifier(type: .table, schema: "public", name: "t1")
+        let view = ObjectIdentifier(type: .view, schema: "public", name: "v1")
+
+        let source = ConfigurableDiffIntrospector(objects: [table, view])
+        let target = ConfigurableDiffIntrospector(objects: [table])
+
+        let differ = SchemaDiffer(logger: Logger(label: "test"))
+        let result = try await differ.diff(source: source, target: target, types: [.table])
+
+        // view should be excluded
+        #expect(result.onlyInSource.isEmpty)
+        #expect(result.matching == 1)
+    }
 }
 
 /// Mock introspector for diff tests that returns canned object lists.
