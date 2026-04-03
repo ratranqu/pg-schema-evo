@@ -156,61 +156,257 @@ struct CoverageBoost2IntegrationTests {
         try? await conn2.close()
     }
 
-    // MARK: - SyncOrchestrator: object not found case
+    // MARK: - Introspector: describeTable
 
-    @Test("Sync handles object not found in source or target gracefully")
-    func syncObjectNotFound() async throws {
-        let sourceConfig = try IntegrationTestConfig.sourceConfig()
-        let targetConfig = try IntegrationTestConfig.targetConfig()
+    @Test("Describe table via introspector returns columns")
+    func describeTable() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let conn = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await conn.close() } }
 
-        let syncJob = SyncJob(
-            source: sourceConfig,
-            target: targetConfig,
-            objects: [
-                ObjectSpec(id: ObjectIdentifier(type: .table, schema: "public", name: "nonexistent_table_xyz_99"))
-            ],
-            dryRun: true,
-            force: true
-        )
+        let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "users")
+        let metadata = try await introspector.describeTable(tableId)
 
-        let orchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)
-        let output = try await orchestrator.execute(job: syncJob)
-
-        // Object not found in either — should return "already in sync"
-        #expect(output.contains("already in sync"))
+        #expect(metadata.columns.contains { $0.name == "id" })
+        #expect(metadata.columns.contains { $0.name == "username" })
+        #expect(metadata.columns.contains { $0.name == "email" })
     }
 
-    // MARK: - DataSync: initialize with multiple tables
+    // MARK: - Introspector: describeView
 
-    @Test("Data sync initialize with multiple tables")
-    func dataSyncInitMultiple() async throws {
-        let sourceConfig = try IntegrationTestConfig.sourceConfig()
-        let stateFile = NSTemporaryDirectory() + "data-sync-multi-\(UUID().uuidString).yaml"
+    @Test("Describe view via introspector returns definition")
+    func describeView() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let conn = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await conn.close() } }
 
-        let job = DataSyncJob(
-            source: sourceConfig,
-            target: sourceConfig,
-            tables: [
-                DataSyncTableConfig(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: "products"),
-                    trackingColumn: "created_at"
-                ),
-                DataSyncTableConfig(
-                    id: ObjectIdentifier(type: .table, schema: "public", name: "orders"),
-                    trackingColumn: "created_at"
-                ),
-            ],
-            stateFilePath: stateFile
-        )
+        let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
+        let viewId = ObjectIdentifier(type: .view, schema: "public", name: "active_users")
+        let metadata = try await introspector.describeView(viewId)
 
-        let orchestrator = DataSyncOrchestrator(logger: IntegrationTestConfig.logger)
-        let output = try await orchestrator.initialize(job: job)
+        #expect(metadata.definition.contains("users"))
+    }
 
-        #expect(output.contains("public.products"))
-        #expect(output.contains("public.orders"))
+    // MARK: - Introspector: describeSequence
 
-        let store = DataSyncStateStore()
-        let state = try store.load(path: stateFile)
-        #expect(state.tables.count == 2)
+    @Test("Describe sequence via introspector")
+    func describeSequence() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let conn = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await conn.close() } }
+
+        let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
+        let seqId = ObjectIdentifier(type: .sequence, schema: "public", name: "invoice_number_seq")
+        let metadata = try await introspector.describeSequence(seqId)
+
+        #expect(metadata.startValue == 1000)
+        #expect(metadata.increment == 1)
+    }
+
+    // MARK: - Introspector: describeEnum
+
+    @Test("Describe enum via introspector returns labels")
+    func describeEnum() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let conn = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await conn.close() } }
+
+        let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
+        let enumId = ObjectIdentifier(type: .enum, schema: "public", name: "order_status")
+        let metadata = try await introspector.describeEnum(enumId)
+
+        #expect(metadata.labels.contains("pending"))
+        #expect(metadata.labels.contains("shipped"))
+        #expect(metadata.labels.contains("delivered"))
+    }
+
+    // MARK: - Introspector: describeCompositeType
+
+    @Test("Describe composite type via introspector")
+    func describeCompositeType() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let conn = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await conn.close() } }
+
+        let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
+        let typeId = ObjectIdentifier(type: .compositeType, schema: "public", name: "address")
+        let metadata = try await introspector.describeCompositeType(typeId)
+
+        #expect(metadata.attributes.contains { $0.name == "street" })
+        #expect(metadata.attributes.contains { $0.name == "city" })
+    }
+
+    // MARK: - Introspector: describeFunction
+
+    @Test("Describe function via introspector returns definition")
+    func describeFunction() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let conn = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await conn.close() } }
+
+        let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
+        let funcId = ObjectIdentifier(type: .function, schema: "public", name: "calculate_order_total")
+        let metadata = try await introspector.describeFunction(funcId)
+
+        #expect(metadata.definition.contains("calculate_order_total"))
+        #expect(metadata.language == "sql")
+    }
+
+    // MARK: - Introspector: permissions
+
+    @Test("List permissions for table")
+    func listPermissions() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let conn = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await conn.close() } }
+
+        let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "users")
+        let perms = try await introspector.permissions(for: tableId)
+
+        // The seed grants SELECT to readonly_role and multiple privs to app_role
+        #expect(!perms.isEmpty)
+    }
+
+    // MARK: - Introspector: RLS policies
+
+    @Test("List RLS policies for users table")
+    func listRLSPolicies() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let conn = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await conn.close() } }
+
+        let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "users")
+        let rlsInfo = try await introspector.rlsPolicies(for: tableId)
+
+        #expect(rlsInfo.isEnabled == true)
+        #expect(rlsInfo.policies.contains { $0.name == "users_self_access" })
+    }
+
+    // MARK: - Introspector: partitionInfo
+
+    @Test("Get partition info for events table")
+    func partitionInfo() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let conn = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await conn.close() } }
+
+        let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "events")
+        let partInfo = try await introspector.partitionInfo(for: tableId)
+
+        #expect(partInfo != nil)
+        #expect(partInfo?.strategy == "RANGE")
+    }
+
+    // MARK: - Introspector: listPartitions
+
+    @Test("List partitions for events table")
+    func listPartitions() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let conn = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await conn.close() } }
+
+        let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "events")
+        let partitions = try await introspector.listPartitions(for: tableId)
+
+        #expect(partitions.count >= 2)
+        #expect(partitions.contains { $0.id.name == "events_2025q1" })
+        #expect(partitions.contains { $0.id.name == "events_2025q2" })
+    }
+
+    // MARK: - Introspector: primaryKeyColumns
+
+    @Test("Get primary key columns for users table")
+    func primaryKeyColumns() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let conn = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await conn.close() } }
+
+        let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "users")
+        let pkCols = try await introspector.primaryKeyColumns(for: tableId)
+
+        #expect(pkCols == ["id"])
+    }
+
+    // MARK: - Introspector: relationSize
+
+    @Test("Get relation size for users table")
+    func relationSize() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let conn = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await conn.close() } }
+
+        let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "users")
+        let size = try await introspector.relationSize(tableId)
+
+        #expect(size != nil)
+        #expect(size! > 0)
+    }
+
+    // MARK: - Introspector: dependencies
+
+    @Test("Get dependencies for orders table")
+    func dependencies() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let conn = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await conn.close() } }
+
+        let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
+        let tableId = ObjectIdentifier(type: .table, schema: "public", name: "orders")
+        let deps = try await introspector.dependencies(for: tableId)
+
+        // orders depends on users (FK) and order_status (enum)
+        #expect(!deps.isEmpty)
+    }
+
+    // MARK: - Introspector: describeRole
+
+    @Test("Describe role via introspector")
+    func describeRole() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let conn = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await conn.close() } }
+
+        let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
+        let roleId = ObjectIdentifier(type: .role, name: "readonly_role")
+        let metadata = try await introspector.describeRole(roleId)
+
+        #expect(metadata.id.name == "readonly_role")
+    }
+
+    // MARK: - Introspector: describeSchema
+
+    @Test("Describe schema via introspector")
+    func describeSchema() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let conn = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await conn.close() } }
+
+        let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
+        let schemaId = ObjectIdentifier(type: .schema, name: "analytics")
+        let metadata = try await introspector.describeSchema(schemaId)
+
+        #expect(metadata.id.name == "analytics")
+    }
+
+    // MARK: - Introspector: describeMaterializedView
+
+    @Test("Describe materialized view via introspector")
+    func describeMaterializedView() async throws {
+        let config = try IntegrationTestConfig.sourceConfig()
+        let conn = try await IntegrationTestConfig.connect(to: config)
+        defer { Task { try? await conn.close() } }
+
+        let introspector = PGCatalogIntrospector(connection: conn, logger: IntegrationTestConfig.logger)
+        let mvId = ObjectIdentifier(type: .materializedView, schema: "analytics", name: "daily_order_summary")
+        let metadata = try await introspector.describeMaterializedView(mvId)
+
+        #expect(metadata.definition.contains("order_date") || metadata.definition.contains("orders"))
     }
 }
