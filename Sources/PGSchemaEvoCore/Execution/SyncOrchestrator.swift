@@ -24,6 +24,12 @@ public struct SyncOrchestrator: Sendable {
             config: job.target,
             logger: logger
         )
+        defer {
+            Task {
+                try? await sourceConn.close()
+                try? await targetConn.close()
+            }
+        }
 
         let sourceIntrospector = PGCatalogIntrospector(connection: sourceConn, logger: logger)
         let targetIntrospector = PGCatalogIntrospector(connection: targetConn, logger: logger)
@@ -168,13 +174,8 @@ public struct SyncOrchestrator: Sendable {
             }
 
         } catch {
-            try? await sourceConn.close()
-            try? await targetConn.close()
             throw error
         }
-
-        try? await sourceConn.close()
-        try? await targetConn.close()
 
         if steps.isEmpty {
             return "Target is already in sync with source. No changes needed."

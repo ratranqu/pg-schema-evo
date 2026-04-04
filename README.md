@@ -201,8 +201,8 @@ llvm-cov report \
 
 | Metric | Value |
 |--------|-------|
-| Line coverage | **90.26%** (max 1% regression per PR) |
-| Test suites | 84 suites, 1019 tests (763 unit, 256 integration) |
+| Line coverage | **90.04%** (max 1% regression per PR) |
+| Test suites | 93 suites, 1060 tests (804 unit, 256 integration) |
 
 > Coverage is automatically updated in this README on each merge to main.
 
@@ -215,4 +215,4 @@ llvm-cov report \
 
 ## Status
 
-Version 0.5.0 — Schema migration and migration tracking: full `migrate` CLI command with `generate`, `apply`, `rollback`, and `status` subcommands. Migrations stored as paired YAML metadata + plain SQL files with UP/DOWN/CUSTOM/DATA sections. Reverse SQL generation for all object types. Checksum verification with force-apply option. Migration tracking via configurable PostgreSQL table. Irreversible change detection. Comprehensive test coverage at 90%+ with 1008 tests across 83 suites.
+Version 0.5.1 — Robustness improvements: connection pool leak fix using `defer` in CloneOrchestrator, SyncOrchestrator, DataSyncOrchestrator, and MigrationApplicator; WHERE clause validation to prevent SQL injection; atomic state file updates in data-sync; improved MAX query failure handling; object spec validation in preflight checks; narrower error catching; comprehensive DROP SQL generation for all object types in SchemaDiffer; partition boundary replacement hardening; logging for destructive operations. 1060 tests across 93 suites at 90%+ coverage.

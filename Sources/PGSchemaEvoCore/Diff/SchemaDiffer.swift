@@ -75,8 +75,12 @@ public struct SchemaDiffer: Sendable {
             return try await compareRole(id, source: source, target: target)
         case .extension:
             return try await compareExtension(id, source: source, target: target)
-        default:
-            // Aggregates, operators, FDWs, foreign tables: no structured comparison yet
+        case .aggregate, .operator, .foreignDataWrapper, .foreignTable:
+            // These types use pg_dump for DDL extraction and lack structured metadata
+            // for field-by-field comparison. A future enhancement could compare the raw
+            // pg_dump output, but for now they are treated as always-matching when present
+            // in both databases.
+            logger.debug("Skipping comparison for \(id.type.displayName) \(id): structured diff not implemented")
             return nil
         }
     }
@@ -704,7 +708,11 @@ public struct SchemaDiff: Sendable {
         case .enum, .compositeType: keyword = "TYPE"
         case .schema: keyword = "SCHEMA"
         case .extension: keyword = "EXTENSION"
-        default: keyword = "TABLE" // fallback
+        case .role: keyword = "ROLE"
+        case .foreignTable: keyword = "FOREIGN TABLE"
+        case .foreignDataWrapper: keyword = "FOREIGN DATA WRAPPER"
+        case .aggregate: keyword = "AGGREGATE"
+        case .operator: keyword = "OPERATOR"
         }
         let name = id.type == .role ? id.name : id.qualifiedName
         return "DROP \(keyword) IF EXISTS \(name) CASCADE;"

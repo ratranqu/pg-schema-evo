@@ -80,7 +80,11 @@ public final class PostgresConnectionPool: Sendable {
             return all
         }
         for conn in conns {
-            try? await conn.close()
+            do {
+                try await conn.close()
+            } catch {
+                logger.warning("Failed to close pooled connection: \(error.localizedDescription)")
+            }
         }
     }
 

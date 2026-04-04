@@ -38,6 +38,7 @@ public struct CloneOrchestrator: Sendable {
             size: poolSize,
             logger: logger
         )
+        defer { Task { await pool.close() } }
 
         let introspector = PooledIntrospector(pool: pool, logger: logger)
         let pgDumpIntrospector = PgDumpIntrospector(sourceConfig: job.source, logger: logger)
@@ -75,6 +76,7 @@ public struct CloneOrchestrator: Sendable {
 
                 // Drop if exists
                 if job.dropIfExists {
+                    logger.info("Will drop existing \(spec.id) before cloning")
                     ddlSteps.append(.dropObject(spec.id))
                 }
 
@@ -87,13 +89,21 @@ public struct CloneOrchestrator: Sendable {
                     if let partInfo = try await introspector.partitionInfo(for: spec.id) {
                         // Create parent as partitioned table
                         let createSQL = try tableSQLGen.generateCreate(from: metadata)
-                        // Append PARTITION BY clause
-                        let partitionedSQL = createSQL.replacingOccurrences(
-                            of: ");",
-                            with: ") PARTITION BY \(partInfo.strategy) (\(partInfo.partitionKey));",
-                            options: [],
-                            range: createSQL.range(of: ");", options: .backwards, range: nil, locale: nil) ?? createSQL.startIndex..<createSQL.endIndex
-                        )
+                        // Append PARTITION BY clause before the closing ");".
+                        // Find the last ");", which terminates the CREATE TABLE statement.
+                        let partitionClause = " PARTITION BY \(partInfo.strategy) (\(partInfo.partitionKey))"
+                        let partitionedSQL: String
+                        if let lastClosing = createSQL.range(of: ");", options: .backwards) {
+                            partitionedSQL = createSQL.replacingCharacters(
+                                in: lastClosing,
+                                with: ")\(partitionClause);"
+                            )
+                        } else {
+                            // Fallback: append to end (shouldn't happen with valid CREATE TABLE)
+                            logger.warning("Could not find closing '); in CREATE TABLE for \(spec.id), appending PARTITION BY")
+                            partitionedSQL = createSQL.trimmingCharacters(in: .whitespacesAndNewlines)
+                                .replacingOccurrences(of: ";$", with: "\(partitionClause);", options: .regularExpression)
+                        }
                         ddlSteps.append(.createObject(sql: partitionedSQL, id: spec.id))
 
                         // Create and attach each child partition
@@ -280,11 +290,8 @@ public struct CloneOrchestrator: Sendable {
                 }
             }
         } catch {
-            await pool.close()
             throw error
         }
-
-        await pool.close()
 
         if job.dryRun {
             let progress = ProgressReporter(totalSteps: ddlSteps.count + dataTransfers.count)
