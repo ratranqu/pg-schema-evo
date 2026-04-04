@@ -279,14 +279,32 @@ psql "$TARGET_DSN" -f migration.sql
 
 ### Example 7: Clone with Conflict Resolution
 
-Conflict resolution also works with the `clone` command:
+When cloning objects that already exist on the target, conflict resolution
+detects schema differences and applies only the delta (ALTER statements) instead
+of dropping and recreating. This is safer than `--drop-existing`:
+
+```bash
+# Target already has demo_users with an extra column.
+# Clone with source-wins to bring target in sync:
+pg-schema-evo clone \
+  --source-dsn "$SOURCE_DSN" \
+  --target-dsn "$TARGET_DSN" \
+  --object table:public.demo_users \
+  --ours --force --dry-run
+```
+
+**Expected:** The output contains ALTER TABLE statements (ADD COLUMN, DROP
+COLUMN) rather than DROP TABLE + CREATE TABLE. Safe changes are always applied;
+destructive changes require `--force`.
+
+Clone also supports `--conflict-file` and `--resolve-from` for offline review:
 
 ```bash
 pg-schema-evo clone \
   --source-dsn "$SOURCE_DSN" \
   --target-dsn "$TARGET_DSN" \
   --object table:public.demo_users \
-  --ours --force --dry-run
+  --conflict-file /tmp/clone-conflicts.json --dry-run
 ```
 
 ---
@@ -396,10 +414,15 @@ chmod +x verify-conflict-resolution.sh
 
 - **ConflictDetector** transforms a `SchemaDiff` into a `ConflictReport` by
   classifying only destructive/irreversible changes as conflicts
-- **ConflictResolver** applies the chosen strategy to produce `ConflictResolution` entries
+- **ConflictResolver** applies the chosen strategy to produce `ConflictResolution`
+  entries. Includes `resolveFromFile()` for file-based resolution shared by both
+  orchestrators
 - **ConflictFileIO** handles JSON serialization for offline review workflows
 - **SyncOrchestrator** integrates conflict detection into the sync pipeline,
   applying safe migrations unconditionally and only blocking on actual conflicts
+- **CloneOrchestrator** detects when target objects already exist and uses
+  schema diffing + conflict resolution to apply delta changes instead of
+  full DROP+CREATE. Falls back to normal clone for new objects
 
 The conflict resolution system is opt-in: when no conflict flags are specified,
 the tool behaves exactly as it did before the feature was added. Destructive

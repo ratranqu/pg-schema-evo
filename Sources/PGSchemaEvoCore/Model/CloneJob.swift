@@ -26,6 +26,8 @@ public struct CloneJob: Sendable {
     public let conflictFilePath: String?
     /// Path to read resolutions from a previously generated conflict file (--resolve-from).
     public let resolveFromPath: String?
+    /// Whether conflict resolution was explicitly requested via CLI flags.
+    public let conflictResolutionExplicit: Bool
 
     /// Default threshold: 100 MB.
     public static let defaultDataSizeThreshold = 100 * 1024 * 1024
@@ -46,7 +48,8 @@ public struct CloneJob: Sendable {
         conflictStrategy: ConflictStrategy = .fail,
         autoAcceptNonDestructive: Bool = false,
         conflictFilePath: String? = nil,
-        resolveFromPath: String? = nil
+        resolveFromPath: String? = nil,
+        conflictResolutionExplicit: Bool = false
     ) {
         self.source = source
         self.target = target
@@ -64,5 +67,6 @@ public struct CloneJob: Sendable {
         self.autoAcceptNonDestructive = autoAcceptNonDestructive
         self.conflictFilePath = conflictFilePath
         self.resolveFromPath = resolveFromPath
+        self.conflictResolutionExplicit = conflictResolutionExplicit
     }
 }

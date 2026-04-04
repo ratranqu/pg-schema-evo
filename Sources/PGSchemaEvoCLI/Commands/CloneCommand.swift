@@ -111,7 +111,8 @@ struct CloneCommand: AsyncParsableCommand {
                 conflictStrategy: conflictStrategy,
                 autoAcceptNonDestructive: conflict.yes,
                 conflictFilePath: conflict.conflictFile,
-                resolveFromPath: conflict.resolveFrom
+                resolveFromPath: conflict.resolveFrom,
+                conflictResolutionExplicit: conflict.isExplicit
             )
         } else {
             // Parse from CLI args only
@@ -162,7 +163,8 @@ struct CloneCommand: AsyncParsableCommand {
                 conflictStrategy: conflictStrategy,
                 autoAcceptNonDestructive: conflict.yes,
                 conflictFilePath: conflict.conflictFile,
-                resolveFromPath: conflict.resolveFrom
+                resolveFromPath: conflict.resolveFrom,
+                conflictResolutionExplicit: conflict.isExplicit
             )
         }
 

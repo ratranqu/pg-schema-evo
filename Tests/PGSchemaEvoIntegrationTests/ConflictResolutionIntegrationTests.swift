@@ -714,4 +714,356 @@ struct ConflictResolutionIntegrationTests {
         try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).conflict_table CASCADE", on: sc)
         try? await sc.close()
     }
+
+    // MARK: - Clone conflict resolution
+
+    @Test("Clone with fail strategy throws when target object exists with conflicts")
+    func cloneFailStrategyThrowsOnExisting() async throws {
+        let sourceConfig = try IntegrationTestConfig.sourceConfig()
+        let targetConfig = try IntegrationTestConfig.targetConfig()
+        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
+
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await Self.ensureTestSchema(on: targetConn)
+        try await Self.cleanup(sourceConn: sourceConn, targetConn: targetConn)
+
+        // Source: table with 2 columns
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL
+            )
+        """, on: sourceConn)
+
+        // Target: same table with extra column
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL,
+                extra_col text
+            )
+        """, on: targetConn)
+
+        try? await sourceConn.close()
+        try? await targetConn.close()
+
+        let tableId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "conflict_table")
+        let cloneJob = CloneJob(
+            source: sourceConfig,
+            target: targetConfig,
+            objects: [ObjectSpec(id: tableId)],
+            dryRun: true,
+            force: true,
+            conflictStrategy: .fail,
+            conflictResolutionExplicit: true
+        )
+
+        let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
+
+        do {
+            _ = try await orchestrator.execute(job: cloneJob)
+            #expect(Bool(false), "Expected conflictsDetected error")
+        } catch let error as PGSchemaEvoError {
+            if case .conflictsDetected(let count, let destructive) = error {
+                #expect(count > 0)
+                #expect(destructive > 0)
+            } else {
+                #expect(Bool(false), "Unexpected error type: \(error)")
+            }
+        }
+
+        // Clean up
+        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let tc = try await IntegrationTestConfig.connect(to: targetConfig)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).conflict_table CASCADE", on: sc)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).conflict_table CASCADE", on: tc)
+        try? await sc.close()
+        try? await tc.close()
+    }
+
+    @Test("Clone with source-wins applies delta when target object exists")
+    func cloneSourceWinsAppliesDelta() async throws {
+        let sourceConfig = try IntegrationTestConfig.sourceConfig()
+        let targetConfig = try IntegrationTestConfig.targetConfig()
+        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
+
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await Self.ensureTestSchema(on: targetConn)
+        try await Self.cleanup(sourceConn: sourceConn, targetConn: targetConn)
+
+        // Source: table with 3 columns (added email)
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL,
+                email text
+            )
+        """, on: sourceConn)
+
+        // Target: table with 2 columns + extra column
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL,
+                extra_col text
+            )
+        """, on: targetConn)
+
+        try? await sourceConn.close()
+        try? await targetConn.close()
+
+        let tableId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "conflict_table")
+        let cloneJob = CloneJob(
+            source: sourceConfig,
+            target: targetConfig,
+            objects: [ObjectSpec(id: tableId)],
+            dryRun: true,
+            force: true,
+            conflictStrategy: .sourceWins,
+            conflictResolutionExplicit: true
+        )
+
+        let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
+        let script = try await orchestrator.execute(job: cloneJob)
+
+        // Should contain ALTER for adding missing column (safe migration)
+        #expect(script.contains("email"))
+        // Should contain DROP for extra column (conflict resolved as source-wins)
+        #expect(script.contains("DROP COLUMN") || script.contains("extra_col"))
+        // Should NOT contain CREATE TABLE (uses delta, not full create)
+        #expect(!script.contains("CREATE TABLE"))
+
+        // Clean up
+        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let tc = try await IntegrationTestConfig.connect(to: targetConfig)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).conflict_table CASCADE", on: sc)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).conflict_table CASCADE", on: tc)
+        try? await sc.close()
+        try? await tc.close()
+    }
+
+    @Test("Clone with conflict-file writes report for existing target object")
+    func cloneConflictFileWritesReport() async throws {
+        let sourceConfig = try IntegrationTestConfig.sourceConfig()
+        let targetConfig = try IntegrationTestConfig.targetConfig()
+        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
+
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await Self.ensureTestSchema(on: targetConn)
+        try await Self.cleanup(sourceConn: sourceConn, targetConn: targetConn)
+
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL
+            )
+        """, on: sourceConn)
+
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL,
+                extra_col text
+            )
+        """, on: targetConn)
+
+        try? await sourceConn.close()
+        try? await targetConn.close()
+
+        let tmpFile = NSTemporaryDirectory() + "clone-conflict-test-\(UUID().uuidString).json"
+        defer { try? FileManager.default.removeItem(atPath: tmpFile) }
+
+        let tableId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "conflict_table")
+        let cloneJob = CloneJob(
+            source: sourceConfig,
+            target: targetConfig,
+            objects: [ObjectSpec(id: tableId)],
+            dryRun: true,
+            force: true,
+            conflictStrategy: .fail,
+            conflictFilePath: tmpFile
+        )
+
+        let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
+        let result = try await orchestrator.execute(job: cloneJob)
+
+        #expect(result.contains("Conflict report written to"))
+        #expect(result.contains(tmpFile))
+
+        // Verify the file was written and contains conflict data
+        let data = try Data(contentsOf: URL(fileURLWithPath: tmpFile))
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(json != nil)
+
+        // Clean up
+        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let tc = try await IntegrationTestConfig.connect(to: targetConfig)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).conflict_table CASCADE", on: sc)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).conflict_table CASCADE", on: tc)
+        try? await sc.close()
+        try? await tc.close()
+    }
+
+    @Test("Clone without conflict flags falls back to normal CREATE for new objects")
+    func cloneNoConflictFlagsCreatesNormally() async throws {
+        let sourceConfig = try IntegrationTestConfig.sourceConfig()
+        let targetConfig = try IntegrationTestConfig.targetConfig()
+        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
+
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await Self.ensureTestSchema(on: targetConn)
+        try await Self.cleanup(sourceConn: sourceConn, targetConn: targetConn)
+
+        // Source: create a table
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL
+            )
+        """, on: sourceConn)
+
+        // Target: no table exists
+        try? await sourceConn.close()
+        try? await targetConn.close()
+
+        let tableId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "conflict_table")
+        let cloneJob = CloneJob(
+            source: sourceConfig,
+            target: targetConfig,
+            objects: [ObjectSpec(id: tableId)],
+            dryRun: true
+        )
+
+        let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
+        let script = try await orchestrator.execute(job: cloneJob)
+
+        // Should be a normal CREATE TABLE (no conflict resolution needed)
+        #expect(script.contains("CREATE TABLE"))
+        #expect(script.contains("conflict_table"))
+
+        // Clean up
+        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).conflict_table CASCADE", on: sc)
+        try? await sc.close()
+    }
+
+    @Test("Clone with skip strategy skips conflicts and preserves target")
+    func cloneSkipStrategySkipsConflicts() async throws {
+        let sourceConfig = try IntegrationTestConfig.sourceConfig()
+        let targetConfig = try IntegrationTestConfig.targetConfig()
+        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
+
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await Self.ensureTestSchema(on: targetConn)
+        try await Self.cleanup(sourceConn: sourceConn, targetConn: targetConn)
+
+        // Source: table with 2 columns
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL,
+                email text
+            )
+        """, on: sourceConn)
+
+        // Target: same table with extra column (conflict)
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL,
+                extra_col text
+            )
+        """, on: targetConn)
+
+        try? await sourceConn.close()
+        try? await targetConn.close()
+
+        let tableId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "conflict_table")
+        let cloneJob = CloneJob(
+            source: sourceConfig,
+            target: targetConfig,
+            objects: [ObjectSpec(id: tableId)],
+            dryRun: true,
+            force: true,
+            conflictStrategy: .skip,
+            conflictResolutionExplicit: true
+        )
+
+        let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
+        let script = try await orchestrator.execute(job: cloneJob)
+
+        // Should contain safe migration (ADD COLUMN email) but NOT DROP COLUMN
+        #expect(script.contains("email"))
+        #expect(!script.contains("DROP COLUMN"))
+        // Should NOT contain CREATE TABLE (uses delta path)
+        #expect(!script.contains("CREATE TABLE"))
+
+        // Clean up
+        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let tc = try await IntegrationTestConfig.connect(to: targetConfig)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).conflict_table CASCADE", on: sc)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).conflict_table CASCADE", on: tc)
+        try? await sc.close()
+        try? await tc.close()
+    }
+
+    @Test("Clone with target-wins keeps target schema for existing objects")
+    func cloneTargetWinsKeepsTarget() async throws {
+        let sourceConfig = try IntegrationTestConfig.sourceConfig()
+        let targetConfig = try IntegrationTestConfig.targetConfig()
+        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
+
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await Self.ensureTestSchema(on: targetConn)
+        try await Self.cleanup(sourceConn: sourceConn, targetConn: targetConn)
+
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL
+            )
+        """, on: sourceConn)
+
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL,
+                extra_col text
+            )
+        """, on: targetConn)
+
+        try? await sourceConn.close()
+        try? await targetConn.close()
+
+        let tableId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "conflict_table")
+        let cloneJob = CloneJob(
+            source: sourceConfig,
+            target: targetConfig,
+            objects: [ObjectSpec(id: tableId)],
+            dryRun: true,
+            force: true,
+            conflictStrategy: .targetWins,
+            conflictResolutionExplicit: true
+        )
+
+        let orchestrator = CloneOrchestrator(logger: IntegrationTestConfig.logger)
+        let script = try await orchestrator.execute(job: cloneJob)
+
+        // target-wins: no DROP COLUMN should appear
+        #expect(!script.contains("DROP COLUMN"))
+
+        // Clean up
+        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let tc = try await IntegrationTestConfig.connect(to: targetConfig)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).conflict_table CASCADE", on: sc)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).conflict_table CASCADE", on: tc)
+        try? await sc.close()
+        try? await tc.close()
+    }
 }

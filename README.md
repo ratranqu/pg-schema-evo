@@ -215,4 +215,4 @@ llvm-cov report \
 
 ## Status
 
-Version 0.6.1 — Code coverage boosted to 90%+ (from ~89.7%) with targeted unit and integration tests for conflict resolution edge cases: drop-statement generation for all object types, interactive strategy fallback, conflict file error handling, destructive diff overflow, and legacy backward-compatibility paths. Added comprehensive conflict resolution documentation with runnable examples (`docs/conflict-resolution.md`). 1084 tests across 90 suites, 90.02% region coverage.
+Version 0.7.0 — Conflict resolution now fully integrated into both `sync` and `clone` commands. Clone detects existing target objects and applies schema delta (ALTER statements) instead of DROP+CREATE, with full conflict detection and resolution support. Shared `resolveFromFile()` method eliminates code duplication between orchestrators. 1090 tests across 90 suites, 90.11% region coverage.

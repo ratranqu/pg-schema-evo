@@ -98,6 +98,33 @@ public struct ConflictResolver: Sendable {
         return resolutions
     }
 
+    /// Resolve conflicts from a previously saved conflict file.
+    /// Returns matched resolutions. Throws on unresolved conflicts if strategy is `.fail`.
+    public static func resolveFromFile(
+        path: String,
+        report: ConflictReport,
+        strategy: ConflictStrategy,
+        logger: Logger
+    ) throws -> [ConflictResolution] {
+        let fileResolutions = try ConflictFileIO.readResolutions(from: path)
+        let fileConflicts = try ConflictFileIO.readConflicts(from: path)
+        let (matched, unresolved) = ConflictFileIO.matchResolutions(
+            fileResolutions: fileResolutions,
+            fileConflicts: fileConflicts,
+            report: report
+        )
+        if !unresolved.isEmpty {
+            logger.warning("\(unresolved.count) new conflict(s) not in resolution file")
+            if strategy == .fail {
+                throw PGSchemaEvoError.conflictsDetected(
+                    count: unresolved.count,
+                    destructive: unresolved.filter(\.isDestructive).count
+                )
+            }
+        }
+        return matched
+    }
+
     /// Collect the SQL statements to execute based on resolved conflicts.
     /// Returns only the SQL for conflicts resolved as `applySource`.
     public static func sqlForResolutions(

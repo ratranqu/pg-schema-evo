@@ -328,26 +328,10 @@ public struct SyncOrchestrator: Sendable {
     ) async throws -> [ConflictResolution] {
         guard !report.isEmpty else { return [] }
 
-        // If --resolve-from is specified, load resolutions from file
         if let resolveFromPath = job.resolveFromPath {
-            let fileResolutions = try ConflictFileIO.readResolutions(from: resolveFromPath)
-            let fileConflicts = try ConflictFileIO.readConflicts(from: resolveFromPath)
-            let (matched, unresolved) = ConflictFileIO.matchResolutions(
-                fileResolutions: fileResolutions,
-                fileConflicts: fileConflicts,
-                report: report
+            return try ConflictResolver.resolveFromFile(
+                path: resolveFromPath, report: report, strategy: strategy, logger: logger
             )
-            if !unresolved.isEmpty {
-                logger.warning("\(unresolved.count) new conflict(s) not in resolution file")
-                // Fail on unresolved conflicts unless strategy handles them
-                if strategy == .fail {
-                    throw PGSchemaEvoError.conflictsDetected(
-                        count: unresolved.count,
-                        destructive: unresolved.filter(\.isDestructive).count
-                    )
-                }
-            }
-            return matched
         }
 
         let resolver = ConflictResolver(strategy: strategy, force: force, logger: logger)
