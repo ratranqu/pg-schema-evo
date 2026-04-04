@@ -215,4 +215,4 @@ llvm-cov report \
 
 ## Status
 
-Version 0.7.0 — Conflict resolution now fully integrated into both `sync` and `clone` commands. Clone detects existing target objects and applies schema delta (ALTER statements) instead of DROP+CREATE, with full conflict detection and resolution support. Shared `resolveFromFile()` method eliminates code duplication between orchestrators. 1090 tests across 90 suites, 90.11% region coverage.
+Version 0.8.0 — Enhanced SchemaDiffer now compares identity columns (`isIdentity`, `identityGeneration`), character max length, numeric precision/scale, and constraint/index definitions (not just names). PGCatalog introspection populates precision fields via `information_schema` helper functions. Conflict resolution fully integrated into both `sync` and `clone` commands. 1105 tests across 90 suites, 90.06% region coverage.

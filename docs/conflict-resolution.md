@@ -412,6 +412,13 @@ chmod +x verify-conflict-resolution.sh
 
 ## Architecture Notes
 
+- **SchemaDiffer** compares source and target schemas field-by-field:
+  - **Column properties**: data type, nullability, defaults, identity
+    (`isIdentity`, `identityGeneration`), character max length, numeric
+    precision/scale
+  - **Constraints and indexes**: compared by name *and* definition — a name
+    match with a different definition generates DROP + re-CREATE SQL
+  - **Triggers and RLS policies**: compared by name and definition
 - **ConflictDetector** transforms a `SchemaDiff` into a `ConflictReport` by
   classifying only destructive/irreversible changes as conflicts
 - **ConflictResolver** applies the chosen strategy to produce `ConflictResolution`

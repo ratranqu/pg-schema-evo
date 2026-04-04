@@ -126,6 +126,71 @@ public struct SchemaDiffer: Sendable {
                         reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) DROP DEFAULT;")
                     }
                 }
+                // Compare identity columns
+                if srcCol.isIdentity != tgtCol.isIdentity {
+                    if srcCol.isIdentity {
+                        let gen = srcCol.identityGeneration ?? "ALWAYS"
+                        differences.append("Column \(name): identity added (GENERATED \(gen))")
+                        migrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) ADD GENERATED \(gen) AS IDENTITY;")
+                        reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) DROP IDENTITY;")
+                    } else {
+                        let gen = tgtCol.identityGeneration ?? "ALWAYS"
+                        differences.append("Column \(name): identity removed (was GENERATED \(gen))")
+                        migrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) DROP IDENTITY;")
+                        reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) ADD GENERATED \(gen) AS IDENTITY;")
+                    }
+                } else if srcCol.isIdentity && srcCol.identityGeneration != tgtCol.identityGeneration {
+                    let srcGen = srcCol.identityGeneration ?? "ALWAYS"
+                    let tgtGen = tgtCol.identityGeneration ?? "ALWAYS"
+                    differences.append("Column \(name): identity generation \(tgtGen) -> \(srcGen)")
+                    migrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) SET GENERATED \(srcGen);")
+                    reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) SET GENERATED \(tgtGen);")
+                }
+                // Compare character length and numeric precision/scale
+                if srcCol.characterMaximumLength != tgtCol.characterMaximumLength,
+                   srcCol.characterMaximumLength != nil || tgtCol.characterMaximumLength != nil {
+                    let srcLen = srcCol.characterMaximumLength.map(String.init) ?? "unlimited"
+                    let tgtLen = tgtCol.characterMaximumLength.map(String.init) ?? "unlimited"
+                    differences.append("Column \(name): character max length \(tgtLen) -> \(srcLen)")
+                    // Generate ALTER TYPE only when dataType comparison didn't already handle it
+                    if srcCol.dataType == tgtCol.dataType {
+                        if let len = srcCol.characterMaximumLength {
+                            migrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) TYPE \(srcCol.dataType)(\(len));")
+                        } else {
+                            migrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) TYPE \(srcCol.dataType);")
+                        }
+                        if let rLen = tgtCol.characterMaximumLength {
+                            reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) TYPE \(tgtCol.dataType)(\(rLen));")
+                        } else {
+                            reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) TYPE \(tgtCol.dataType);")
+                        }
+                    }
+                }
+                if srcCol.numericPrecision != tgtCol.numericPrecision || srcCol.numericScale != tgtCol.numericScale {
+                    let hasPrecisionDiff = srcCol.numericPrecision != nil || tgtCol.numericPrecision != nil
+                    if hasPrecisionDiff {
+                        let srcPrec = srcCol.numericPrecision.map(String.init) ?? "default"
+                        let tgtPrec = tgtCol.numericPrecision.map(String.init) ?? "default"
+                        let srcScale = srcCol.numericScale.map(String.init) ?? "default"
+                        let tgtScale = tgtCol.numericScale.map(String.init) ?? "default"
+                        differences.append("Column \(name): numeric precision/scale (\(tgtPrec),\(tgtScale)) -> (\(srcPrec),\(srcScale))")
+                        // Generate ALTER TYPE only when dataType comparison didn't already handle it
+                        if srcCol.dataType == tgtCol.dataType {
+                            if let p = srcCol.numericPrecision {
+                                let scaleClause = srcCol.numericScale.map { ",\($0)" } ?? ""
+                                migrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) TYPE \(srcCol.dataType)(\(p)\(scaleClause));")
+                            } else {
+                                migrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) TYPE \(srcCol.dataType);")
+                            }
+                            if let rp = tgtCol.numericPrecision {
+                                let rScaleClause = tgtCol.numericScale.map { ",\($0)" } ?? ""
+                                reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) TYPE \(tgtCol.dataType)(\(rp)\(rScaleClause));")
+                            } else {
+                                reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) ALTER COLUMN \(quoteIdent(name)) TYPE \(tgtCol.dataType);")
+                            }
+                        }
+                    }
+                }
             } else {
                 differences.append("Column \(name): missing in target (type: \(srcCol.dataType))")
                 var colDef = "\(quoteIdent(name)) \(srcCol.dataType)"
@@ -146,38 +211,64 @@ public struct SchemaDiffer: Sendable {
         }
 
         // Compare constraints
-        let srcConstraints = Set(srcMeta.constraints.map(\.name))
-        let tgtConstraints = Set(tgtMeta.constraints.map(\.name))
-        for name in srcConstraints.subtracting(tgtConstraints) {
-            if let con = srcMeta.constraints.first(where: { $0.name == name }) {
+        let srcConstraintMap = Dictionary(uniqueKeysWithValues: srcMeta.constraints.map { ($0.name, $0) })
+        let tgtConstraintMap = Dictionary(uniqueKeysWithValues: tgtMeta.constraints.map { ($0.name, $0) })
+        let srcConstraintNames = Set(srcConstraintMap.keys)
+        let tgtConstraintNames = Set(tgtConstraintMap.keys)
+        for name in srcConstraintNames.subtracting(tgtConstraintNames) {
+            if let con = srcConstraintMap[name] {
                 differences.append("Constraint \(name): missing in target")
                 migrationSQL.append("ALTER TABLE \(id.qualifiedName) ADD CONSTRAINT \(quoteIdent(name)) \(con.definition);")
                 reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) DROP CONSTRAINT \(quoteIdent(name));")
             }
         }
-        for name in tgtConstraints.subtracting(srcConstraints) {
+        for name in tgtConstraintNames.subtracting(srcConstraintNames) {
             differences.append("Constraint \(name): extra in target")
             dropColumnSQL.append("ALTER TABLE \(id.qualifiedName) DROP CONSTRAINT \(quoteIdent(name));")
-            if let con = tgtMeta.constraints.first(where: { $0.name == name }) {
+            if let con = tgtConstraintMap[name] {
                 reverseDropColumnSQL.append("ALTER TABLE \(id.qualifiedName) ADD CONSTRAINT \(quoteIdent(name)) \(con.definition);")
+            }
+        }
+        // Compare definitions for constraints with the same name
+        for name in srcConstraintNames.intersection(tgtConstraintNames) {
+            if let srcCon = srcConstraintMap[name], let tgtCon = tgtConstraintMap[name],
+               srcCon.definition != tgtCon.definition {
+                differences.append("Constraint \(name): definition differs")
+                migrationSQL.append("ALTER TABLE \(id.qualifiedName) DROP CONSTRAINT \(quoteIdent(name));")
+                migrationSQL.append("ALTER TABLE \(id.qualifiedName) ADD CONSTRAINT \(quoteIdent(name)) \(srcCon.definition);")
+                reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) DROP CONSTRAINT \(quoteIdent(name));")
+                reverseMigrationSQL.append("ALTER TABLE \(id.qualifiedName) ADD CONSTRAINT \(quoteIdent(name)) \(tgtCon.definition);")
             }
         }
 
         // Compare indexes
-        let srcIndexes = Set(srcMeta.indexes.map(\.name))
-        let tgtIndexes = Set(tgtMeta.indexes.map(\.name))
-        for name in srcIndexes.subtracting(tgtIndexes) {
-            if let idx = srcMeta.indexes.first(where: { $0.name == name }) {
+        let srcIndexMap = Dictionary(uniqueKeysWithValues: srcMeta.indexes.map { ($0.name, $0) })
+        let tgtIndexMap = Dictionary(uniqueKeysWithValues: tgtMeta.indexes.map { ($0.name, $0) })
+        let srcIndexNames = Set(srcIndexMap.keys)
+        let tgtIndexNames = Set(tgtIndexMap.keys)
+        for name in srcIndexNames.subtracting(tgtIndexNames) {
+            if let idx = srcIndexMap[name] {
                 differences.append("Index \(name): missing in target")
                 migrationSQL.append("\(idx.definition);")
                 reverseMigrationSQL.append("DROP INDEX \(id.schema.map { quoteIdent($0) + "." } ?? "")\(quoteIdent(name));")
             }
         }
-        for name in tgtIndexes.subtracting(srcIndexes) {
+        for name in tgtIndexNames.subtracting(srcIndexNames) {
             differences.append("Index \(name): extra in target")
             dropColumnSQL.append("DROP INDEX \(id.schema.map { quoteIdent($0) + "." } ?? "")\(quoteIdent(name));")
-            if let idx = tgtMeta.indexes.first(where: { $0.name == name }) {
+            if let idx = tgtIndexMap[name] {
                 reverseDropColumnSQL.append("\(idx.definition);")
+            }
+        }
+        // Compare definitions for indexes with the same name
+        for name in srcIndexNames.intersection(tgtIndexNames) {
+            if let srcIdx = srcIndexMap[name], let tgtIdx = tgtIndexMap[name],
+               srcIdx.definition != tgtIdx.definition {
+                differences.append("Index \(name): definition differs")
+                migrationSQL.append("DROP INDEX \(id.schema.map { quoteIdent($0) + "." } ?? "")\(quoteIdent(name));")
+                migrationSQL.append("\(srcIdx.definition);")
+                reverseMigrationSQL.append("DROP INDEX \(id.schema.map { quoteIdent($0) + "." } ?? "")\(quoteIdent(name));")
+                reverseMigrationSQL.append("\(tgtIdx.definition);")
             }
         }
 

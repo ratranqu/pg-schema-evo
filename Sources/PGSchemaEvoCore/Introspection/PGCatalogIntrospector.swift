@@ -1001,7 +1001,10 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
                 CASE WHEN a.attidentity != '' THEN true ELSE false END AS is_identity,
                 CASE WHEN a.attidentity = 'a' THEN 'ALWAYS'
                      WHEN a.attidentity = 'd' THEN 'BY DEFAULT'
-                     ELSE NULL END AS identity_generation
+                     ELSE NULL END AS identity_generation,
+                information_schema._pg_char_max_length(a.atttypid, a.atttypmod)::integer AS character_maximum_length,
+                information_schema._pg_numeric_precision(a.atttypid, a.atttypmod)::integer AS numeric_precision,
+                information_schema._pg_numeric_scale(a.atttypid, a.atttypmod)::integer AS numeric_scale
             FROM pg_catalog.pg_attribute a
             JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -1024,12 +1027,18 @@ public final class PGCatalogIntrospector: SchemaIntrospector, @unchecked Sendabl
             let ordinalPosition = try randomAccess[4].decode(Int.self)
             let isIdentity = try randomAccess[5].decode(Bool.self)
             let identityGeneration = try randomAccess[6].decode(String?.self)
+            let characterMaximumLength = try randomAccess[7].decode(Int?.self)
+            let numericPrecision = try randomAccess[8].decode(Int?.self)
+            let numericScale = try randomAccess[9].decode(Int?.self)
             columns.append(ColumnInfo(
                 name: columnName,
                 dataType: dataType,
                 isNullable: isNullable,
                 columnDefault: columnDefault,
                 ordinalPosition: ordinalPosition,
+                characterMaximumLength: characterMaximumLength,
+                numericPrecision: numericPrecision,
+                numericScale: numericScale,
                 isIdentity: isIdentity,
                 identityGeneration: identityGeneration
             ))
