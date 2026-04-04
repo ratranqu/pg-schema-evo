@@ -4,12 +4,8 @@ import Foundation
 public enum ConflictKind: String, Sendable, Codable, CaseIterable {
     /// Target has columns, indexes, constraints, triggers, or policies not in source.
     case extraInTarget
-    /// Both sides have the same object but definitions differ (type change, nullability, etc.).
-    case divergedDefinition
     /// An entire object exists only in target and would be dropped.
     case objectOnlyInTarget
-    /// Applying source would cause data loss (e.g., DROP COLUMN, type narrowing).
-    case destructiveChange
     /// Change cannot be reversed (e.g., enum value removal in PostgreSQL).
     case irreversibleChange
 }

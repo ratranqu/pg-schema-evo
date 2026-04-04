@@ -8,7 +8,7 @@ struct ConflictResolverTests {
     private func makeConflict(
         isDestructive: Bool = false,
         isIrreversible: Bool = false,
-        kind: ConflictKind = .divergedDefinition
+        kind: ConflictKind = .extraInTarget
     ) -> SchemaConflict {
         SchemaConflict(
             objectIdentifier: "table:public.users",

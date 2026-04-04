@@ -29,7 +29,7 @@ struct ConflictReportTests {
             ),
             SchemaConflict(
                 objectIdentifier: "table:public.users",
-                kind: .divergedDefinition,
+                kind: .extraInTarget,
                 description: "Column age: type changed",
                 sourceSQL: ["ALTER COLUMN ..."]
             )
@@ -80,7 +80,7 @@ struct ConflictReportTests {
             ),
             SchemaConflict(
                 objectIdentifier: "table:public.users",
-                kind: .divergedDefinition,
+                kind: .extraInTarget,
                 description: "Column changed",
                 sourceSQL: ["ALTER ..."]
             )

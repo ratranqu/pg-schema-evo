@@ -16,7 +16,7 @@ struct ConflictFileIOTests {
         )
         let c2 = SchemaConflict(
             objectIdentifier: "table:public.users",
-            kind: .divergedDefinition,
+            kind: .extraInTarget,
             description: "Column age: type integer -> bigint",
             sourceSQL: ["ALTER TABLE \"public\".\"users\" ALTER COLUMN \"age\" TYPE bigint;"],
             targetSQL: ["ALTER TABLE \"public\".\"users\" ALTER COLUMN \"age\" TYPE integer;"]

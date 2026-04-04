@@ -10,15 +10,13 @@ struct ConflictModelTests {
     @Test("ConflictKind raw values")
     func conflictKindRawValues() {
         #expect(ConflictKind.extraInTarget.rawValue == "extraInTarget")
-        #expect(ConflictKind.divergedDefinition.rawValue == "divergedDefinition")
         #expect(ConflictKind.objectOnlyInTarget.rawValue == "objectOnlyInTarget")
-        #expect(ConflictKind.destructiveChange.rawValue == "destructiveChange")
         #expect(ConflictKind.irreversibleChange.rawValue == "irreversibleChange")
     }
 
     @Test("ConflictKind allCases")
     func conflictKindAllCases() {
-        #expect(ConflictKind.allCases.count == 5)
+        #expect(ConflictKind.allCases.count == 3)
     }
 
     // MARK: - ConflictStrategy
@@ -59,7 +57,7 @@ struct ConflictModelTests {
     func schemaConflictDefaults() {
         let conflict = SchemaConflict(
             objectIdentifier: "table:public.users",
-            kind: .divergedDefinition,
+            kind: .extraInTarget,
             description: "Test",
             sourceSQL: ["SQL"]
         )
@@ -81,7 +79,7 @@ struct ConflictModelTests {
     func schemaConflictCodable() throws {
         let conflict = SchemaConflict(
             objectIdentifier: "table:public.users",
-            kind: .destructiveChange,
+            kind: .extraInTarget,
             description: "Column dropped",
             sourceSQL: ["DROP COLUMN ..."],
             targetSQL: ["ADD COLUMN ..."],
