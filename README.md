@@ -215,4 +215,4 @@ llvm-cov report \
 
 ## Status
 
-Version 0.6.0 — Conflict resolution: structured conflict detection from `SchemaDiff` with 5 resolution strategies (`fail`, `source-wins`, `target-wins`, `interactive`, `skip`). All destructive actions halt by default unless `--force` is used. Interactive per-conflict prompts with `--yes` for auto-accept. JSON conflict files for offline review (`--conflict-file` / `--resolve-from`). Integrated into both `sync` and `clone` commands via `--conflict-strategy`, `--ours`, `--theirs`, `--manual` flags.
+Version 0.6.1 — Code coverage boosted to 90%+ (from ~89.7%) with targeted unit and integration tests for conflict resolution edge cases: drop-statement generation for all object types, interactive strategy fallback, conflict file error handling, destructive diff overflow, and legacy backward-compatibility paths. Added comprehensive conflict resolution documentation with runnable examples (`docs/conflict-resolution.md`). 1084 tests across 90 suites, 90.02% region coverage.

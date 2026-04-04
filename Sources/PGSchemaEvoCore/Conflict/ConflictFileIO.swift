@@ -101,16 +101,71 @@ public struct ConflictFileIO: Sendable {
     }
 
     /// Match file-based resolutions against a current conflict report.
-    /// Returns matched resolutions. Conflicts in the file that no longer exist
-    /// are silently skipped. New conflicts not in the file are unresolved.
+    /// Matches by object identifier + kind (not by UUID, since IDs are regenerated).
+    /// Returns matched resolutions (with current conflict IDs) and unresolved conflicts.
     public static func matchResolutions(
         fileResolutions: [ConflictResolution],
+        fileConflicts: [SchemaConflict],
         report: ConflictReport
     ) -> (matched: [ConflictResolution], unresolved: [SchemaConflict]) {
-        let currentIds = Set(report.conflicts.map(\.id))
-        let matched = fileResolutions.filter { currentIds.contains($0.conflictId) }
-        let resolvedIds = Set(matched.map(\.conflictId))
-        let unresolved = report.conflicts.filter { !resolvedIds.contains($0.id) }
+        // Build a lookup from file conflict ID → (objectIdentifier, kind)
+        let fileConflictMap = Dictionary(uniqueKeysWithValues: fileConflicts.map { ($0.id, $0) })
+
+        var matched: [ConflictResolution] = []
+        var resolvedCurrentIds = Set<UUID>()
+
+        for resolution in fileResolutions {
+            guard let fileConflict = fileConflictMap[resolution.conflictId] else { continue }
+
+            // Find matching current conflict by object+kind
+            if let currentConflict = report.conflicts.first(where: {
+                $0.objectIdentifier == fileConflict.objectIdentifier && $0.kind == fileConflict.kind
+                && !resolvedCurrentIds.contains($0.id)
+            }) {
+                matched.append(ConflictResolution(
+                    conflictId: currentConflict.id,
+                    choice: resolution.choice,
+                    timestamp: resolution.timestamp
+                ))
+                resolvedCurrentIds.insert(currentConflict.id)
+            }
+        }
+
+        let unresolved = report.conflicts.filter { !resolvedCurrentIds.contains($0.id) }
         return (matched, unresolved)
+    }
+
+    /// Read conflict entries from a file (for matching purposes).
+    public static func readConflicts(from path: String) throws -> [SchemaConflict] {
+        let url = URL(fileURLWithPath: path)
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw PGSchemaEvoError.conflictFileParseError(path: path, underlying: error.localizedDescription)
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let file: ConflictFile
+        do {
+            file = try decoder.decode(ConflictFile.self, from: data)
+        } catch {
+            throw PGSchemaEvoError.conflictFileParseError(path: path, underlying: error.localizedDescription)
+        }
+
+        return file.conflicts.map { entry in
+            SchemaConflict(
+                id: entry.id,
+                objectIdentifier: entry.object,
+                kind: entry.kind,
+                description: entry.description,
+                sourceSQL: entry.sourceSQL,
+                targetSQL: entry.targetSQL,
+                isDestructive: entry.isDestructive,
+                isIrreversible: entry.isIrreversible
+            )
+        }
     }
 }

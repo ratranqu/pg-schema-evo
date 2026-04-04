@@ -2,7 +2,11 @@ import Foundation
 import Logging
 
 /// Transforms a `SchemaDiff` into a structured `ConflictReport` by classifying
-/// each difference as a `SchemaConflict` with proper kind and destructiveness tagging.
+/// destructive and irreversible differences as `SchemaConflict` entries.
+///
+/// Safe forward-only migrations (ADD COLUMN, ALTER TYPE, etc.) are NOT conflicts —
+/// they are always applied. Only destructive changes (DROP COLUMN, DROP CONSTRAINT,
+/// objects only in target) and irreversible changes need conflict resolution.
 public struct ConflictDetector: Sendable {
     private let logger: Logger
 
@@ -11,6 +15,8 @@ public struct ConflictDetector: Sendable {
     }
 
     /// Detect conflicts from a pre-computed schema diff.
+    /// Only destructive/irreversible changes are classified as conflicts.
+    /// Safe migration SQL is NOT included — it is always applied by the orchestrator.
     public func detect(from diff: SchemaDiff) -> ConflictReport {
         var conflicts: [SchemaConflict] = []
 
@@ -26,7 +32,7 @@ public struct ConflictDetector: Sendable {
             ))
         }
 
-        // Modified objects — classify each difference within the ObjectDiff
+        // Modified objects — only classify destructive/irreversible changes
         for objDiff in diff.modified {
             conflicts.append(contentsOf: classifyObjectDiff(objDiff))
         }
@@ -35,35 +41,15 @@ public struct ConflictDetector: Sendable {
         return ConflictReport(conflicts: conflicts)
     }
 
-    /// Classify individual differences within a single ObjectDiff into SchemaConflicts.
+    /// Classify destructive and irreversible differences within a single ObjectDiff.
+    /// Safe migration changes (migrationSQL) are NOT conflicts.
     private func classifyObjectDiff(_ objDiff: ObjectDiff) -> [SchemaConflict] {
         var conflicts: [SchemaConflict] = []
         let objectId = objDiff.id.description
 
-        // Safe migration changes (non-destructive modifications)
-        // Group migrationSQL with their corresponding differences
-        let safeDiffs = objDiff.differences.filter { diff in
-            // Safe diffs are those NOT associated with dropColumnSQL or irreversible changes
-            !isExtraInTargetDiff(diff) && !isIrreversibleDiff(diff, irreversible: objDiff.irreversibleChanges)
-        }
-
-        // Pair safe differences with their migration SQL
-        if !safeDiffs.isEmpty && !objDiff.migrationSQL.isEmpty {
-            conflicts.append(SchemaConflict(
-                objectIdentifier: objectId,
-                kind: .divergedDefinition,
-                description: safeDiffs.joined(separator: "; "),
-                sourceSQL: objDiff.migrationSQL,
-                targetSQL: objDiff.reverseMigrationSQL,
-                isDestructive: false,
-                detail: "\(safeDiffs.count) difference(s)"
-            ))
-        }
-
         // Destructive changes (drop columns, constraints, indexes, triggers, policies)
         let destructiveDiffs = objDiff.differences.filter { isExtraInTargetDiff($0) }
         if !destructiveDiffs.isEmpty && !objDiff.dropColumnSQL.isEmpty {
-            // Create individual conflicts for each destructive change
             for (index, diff) in destructiveDiffs.enumerated() {
                 let sql = index < objDiff.dropColumnSQL.count ? [objDiff.dropColumnSQL[index]] : []
                 let reverseSQL = index < objDiff.reverseDropColumnSQL.count ? [objDiff.reverseDropColumnSQL[index]] : []
@@ -100,13 +86,6 @@ public struct ConflictDetector: Sendable {
         diff.contains("extra in target") ||
         (diff.contains("enabled on target but not on source")) ||
         (diff.contains("forced on target but not on source"))
-    }
-
-    /// Check if a difference is associated with irreversible changes.
-    private func isIrreversibleDiff(_ diff: String, irreversible: [String]) -> Bool {
-        guard !irreversible.isEmpty else { return false }
-        // Enum label extras are irreversible in PostgreSQL
-        return diff.contains("cannot remove enum values")
     }
 
     /// Generate a DROP statement for an object identifier.

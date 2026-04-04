@@ -30,6 +30,9 @@ public struct SyncJob: Sendable {
     public let conflictFilePath: String?
     /// Path to read resolutions from a previously generated conflict file (--resolve-from).
     public let resolveFromPath: String?
+    /// Whether conflict resolution was explicitly requested by the user.
+    /// When false, legacy behavior is used (skip destructive changes with a warning).
+    public let conflictResolutionExplicit: Bool
 
     public init(
         source: ConnectionConfig,
@@ -46,7 +49,8 @@ public struct SyncJob: Sendable {
         conflictStrategy: ConflictStrategy = .fail,
         autoAcceptNonDestructive: Bool = false,
         conflictFilePath: String? = nil,
-        resolveFromPath: String? = nil
+        resolveFromPath: String? = nil,
+        conflictResolutionExplicit: Bool = false
     ) {
         self.source = source
         self.target = target
@@ -63,6 +67,7 @@ public struct SyncJob: Sendable {
         self.autoAcceptNonDestructive = autoAcceptNonDestructive
         self.conflictFilePath = conflictFilePath
         self.resolveFromPath = resolveFromPath
+        self.conflictResolutionExplicit = conflictResolutionExplicit
     }
 
     /// Convert to a CloneJob for compatibility with ScriptRenderer and LiveExecutor.

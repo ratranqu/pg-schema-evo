@@ -34,8 +34,8 @@ struct ConflictDetectorTests {
         #expect(report.isEmpty)
     }
 
-    @Test("Modified object with only safe migration SQL produces divergedDefinition")
-    func safeMigration() {
+    @Test("Modified object with only safe migration SQL produces no conflicts")
+    func safeMigrationNoConflict() {
         let id = ObjectIdentifier(type: .table, schema: "public", name: "users")
         let objDiff = ObjectDiff(
             id: id,
@@ -45,9 +45,7 @@ struct ConflictDetectorTests {
         )
         let diff = SchemaDiff(onlyInSource: [], onlyInTarget: [], modified: [objDiff], matching: 0)
         let report = detector.detect(from: diff)
-        #expect(report.count == 1)
-        #expect(report.conflicts[0].kind == .divergedDefinition)
-        #expect(report.conflicts[0].isDestructive == false)
+        #expect(report.isEmpty)
     }
 
     @Test("Modified object with dropColumnSQL produces extraInTarget destructive conflicts")
@@ -68,7 +66,7 @@ struct ConflictDetectorTests {
         #expect(report.destructiveConflicts.count == 1)
     }
 
-    @Test("Modified object with both safe and destructive changes produces multiple conflicts")
+    @Test("Modified object with both safe and destructive changes produces only destructive conflict")
     func mixedChanges() {
         let id = ObjectIdentifier(type: .table, schema: "public", name: "users")
         let objDiff = ObjectDiff(
@@ -84,9 +82,10 @@ struct ConflictDetectorTests {
         )
         let diff = SchemaDiff(onlyInSource: [], onlyInTarget: [], modified: [objDiff], matching: 0)
         let report = detector.detect(from: diff)
-        #expect(report.count == 2)
-        #expect(report.nonDestructiveConflicts.count == 1)
+        // Only the destructive change is a conflict; safe migration is always applied
+        #expect(report.count == 1)
         #expect(report.destructiveConflicts.count == 1)
+        #expect(report.conflicts[0].kind == .extraInTarget)
     }
 
     @Test("Irreversible changes produce irreversibleChange conflicts")
@@ -143,6 +142,64 @@ struct ConflictDetectorTests {
             migrationSQL: [],
             dropColumnSQL: ["DROP INDEX \"public\".\"idx_users_email\";"],
             reverseDropColumnSQL: ["CREATE INDEX \"idx_users_email\" ON \"public\".\"users\" (email);"]
+        )
+        let diff = SchemaDiff(onlyInSource: [], onlyInTarget: [], modified: [objDiff], matching: 0)
+        let report = detector.detect(from: diff)
+        #expect(report.count == 1)
+        #expect(report.conflicts[0].isDestructive == true)
+    }
+
+    @Test("Drop statement for various object types")
+    func dropStatementObjectTypes() {
+        let types: [(ObjectType, String)] = [
+            (.materializedView, "MATERIALIZED VIEW"),
+            (.function, "FUNCTION"),
+            (.procedure, "PROCEDURE"),
+            (.enum, "TYPE"),
+            (.compositeType, "TYPE"),
+            (.schema, "SCHEMA"),
+            (.extension, "EXTENSION"),
+        ]
+        for (objType, keyword) in types {
+            let id = ObjectIdentifier(type: objType, schema: "public", name: "test_obj")
+            let diff = SchemaDiff(onlyInSource: [], onlyInTarget: [id], modified: [], matching: 0)
+            let report = detector.detect(from: diff)
+            #expect(report.count == 1)
+            #expect(report.conflicts[0].sourceSQL.first?.contains(keyword) == true,
+                    "Expected \(keyword) in DROP for \(objType)")
+        }
+    }
+
+    @Test("Destructive diffs exceed dropColumnSQL count")
+    func destructiveDiffsExceedDropSQL() {
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "users")
+        let objDiff = ObjectDiff(
+            id: id,
+            differences: [
+                "Column a: extra in target",
+                "Column b: extra in target"
+            ],
+            migrationSQL: [],
+            dropColumnSQL: ["DROP COLUMN a;"],  // Only 1 SQL for 2 diffs
+            reverseDropColumnSQL: []
+        )
+        let diff = SchemaDiff(onlyInSource: [], onlyInTarget: [], modified: [objDiff], matching: 0)
+        let report = detector.detect(from: diff)
+        #expect(report.count == 2)
+        // Second conflict should have empty SQL since index exceeds count
+        #expect(report.conflicts[1].sourceSQL.isEmpty)
+        #expect(report.conflicts[1].targetSQL.isEmpty)
+    }
+
+    @Test("RLS forced on target but not source is detected")
+    func rlsForcedExtraInTarget() {
+        let id = ObjectIdentifier(type: .table, schema: "public", name: "users")
+        let objDiff = ObjectDiff(
+            id: id,
+            differences: ["RLS: forced on target but not on source"],
+            migrationSQL: [],
+            dropColumnSQL: ["ALTER TABLE \"public\".\"users\" NO FORCE ROW LEVEL SECURITY;"],
+            reverseDropColumnSQL: ["ALTER TABLE \"public\".\"users\" FORCE ROW LEVEL SECURITY;"]
         )
         let diff = SchemaDiff(onlyInSource: [], onlyInTarget: [], modified: [objDiff], matching: 0)
         let report = detector.detect(from: diff)

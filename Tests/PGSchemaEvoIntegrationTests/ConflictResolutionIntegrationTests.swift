@@ -58,7 +58,8 @@ struct ConflictResolutionIntegrationTests {
             objects: [ObjectSpec(id: tableId)],
             dryRun: false,
             force: true,
-            conflictStrategy: .fail
+            conflictStrategy: .fail,
+            conflictResolutionExplicit: true
         )
 
         let orchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)
@@ -124,7 +125,8 @@ struct ConflictResolutionIntegrationTests {
             objects: [ObjectSpec(id: tableId)],
             dryRun: false,
             force: true,
-            conflictStrategy: .sourceWins
+            conflictStrategy: .sourceWins,
+            conflictResolutionExplicit: true
         )
 
         let orchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)
@@ -193,7 +195,8 @@ struct ConflictResolutionIntegrationTests {
             objects: [ObjectSpec(id: tableId)],
             dryRun: false,
             force: true,
-            conflictStrategy: .targetWins
+            conflictStrategy: .targetWins,
+            conflictResolutionExplicit: true
         )
 
         let orchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)
@@ -262,7 +265,8 @@ struct ConflictResolutionIntegrationTests {
             objects: [ObjectSpec(id: tableId)],
             dryRun: false,
             force: false,  // No force — destructive should be blocked
-            conflictStrategy: .sourceWins
+            conflictStrategy: .sourceWins,
+            conflictResolutionExplicit: true
         )
 
         let orchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)
@@ -382,6 +386,267 @@ struct ConflictResolutionIntegrationTests {
         try? await sc.close()
     }
 
+    // MARK: - SyncAll with conflict file
+
+    @Test("SyncAll with conflict-file writes report and returns")
+    func syncAllConflictFile() async throws {
+        let sourceConfig = try IntegrationTestConfig.sourceConfig()
+        let targetConfig = try IntegrationTestConfig.targetConfig()
+        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
+
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await Self.ensureTestSchema(on: targetConn)
+        try await Self.cleanup(sourceConn: sourceConn, targetConn: targetConn)
+
+        // Source: 2 columns
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL
+            )
+        """, on: sourceConn)
+
+        // Target: 3 columns (extra one)
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL,
+                extra_col text
+            )
+        """, on: targetConn)
+
+        try? await sourceConn.close()
+        try? await targetConn.close()
+
+        let conflictFilePath = NSTemporaryDirectory() + "conflict-syncall-\(UUID().uuidString).json"
+        defer { try? FileManager.default.removeItem(atPath: conflictFilePath) }
+
+        let tableId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "conflict_table")
+        let syncJob = SyncJob(
+            source: sourceConfig,
+            target: targetConfig,
+            objects: [ObjectSpec(id: tableId)],
+            dryRun: false,
+            force: true,
+            syncAll: true,
+            conflictStrategy: .fail,
+            conflictFilePath: conflictFilePath,
+            conflictResolutionExplicit: true
+        )
+
+        let orchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)
+        let output = try await orchestrator.execute(job: syncJob)
+        #expect(output.contains("Conflict report written"))
+        #expect(FileManager.default.fileExists(atPath: conflictFilePath))
+
+        // Clean up
+        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let tc = try await IntegrationTestConfig.connect(to: targetConfig)
+        try await Self.cleanup(sourceConn: sc, targetConn: tc)
+        try? await sc.close()
+        try? await tc.close()
+    }
+
+    // MARK: - SyncAll with fail strategy
+
+    @Test("SyncAll with fail strategy throws on conflict")
+    func syncAllFailStrategy() async throws {
+        let sourceConfig = try IntegrationTestConfig.sourceConfig()
+        let targetConfig = try IntegrationTestConfig.targetConfig()
+        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
+
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await Self.ensureTestSchema(on: targetConn)
+        try await Self.cleanup(sourceConn: sourceConn, targetConn: targetConn)
+
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL
+            )
+        """, on: sourceConn)
+
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL,
+                extra_col text
+            )
+        """, on: targetConn)
+
+        try? await sourceConn.close()
+        try? await targetConn.close()
+
+        let tableId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "conflict_table")
+        let syncJob = SyncJob(
+            source: sourceConfig,
+            target: targetConfig,
+            objects: [ObjectSpec(id: tableId)],
+            dryRun: false,
+            force: true,
+            syncAll: true,
+            conflictStrategy: .fail,
+            conflictResolutionExplicit: true
+        )
+
+        let orchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)
+        do {
+            _ = try await orchestrator.execute(job: syncJob)
+            #expect(Bool(false), "Expected conflictsDetected error")
+        } catch let error as PGSchemaEvoError {
+            if case .conflictsDetected = error {
+                // Expected
+            } else {
+                #expect(Bool(false), "Unexpected error: \(error)")
+            }
+        }
+
+        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let tc = try await IntegrationTestConfig.connect(to: targetConfig)
+        try await Self.cleanup(sourceConn: sc, targetConn: tc)
+        try? await sc.close()
+        try? await tc.close()
+    }
+
+    // MARK: - SyncAll source-wins with drop-extra
+
+    @Test("SyncAll with source-wins and drop-extra drops target-only objects")
+    func syncAllSourceWinsDropExtra() async throws {
+        let sourceConfig = try IntegrationTestConfig.sourceConfig()
+        let targetConfig = try IntegrationTestConfig.targetConfig()
+        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
+
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await Self.ensureTestSchema(on: targetConn)
+        try await Self.cleanup(sourceConn: sourceConn, targetConn: targetConn)
+
+        // Source has table A
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL
+            )
+        """, on: sourceConn)
+
+        // Target has table A with extra column + we'll also check the drop-extra flag
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL,
+                extra_col text
+            )
+        """, on: targetConn)
+
+        try? await sourceConn.close()
+        try? await targetConn.close()
+
+        let tableId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "conflict_table")
+        let syncJob = SyncJob(
+            source: sourceConfig,
+            target: targetConfig,
+            objects: [ObjectSpec(id: tableId)],
+            dryRun: false,
+            dropExtra: true,
+            force: true,
+            syncAll: true,
+            conflictStrategy: .sourceWins,
+            conflictResolutionExplicit: true
+        )
+
+        let orchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)
+        _ = try await orchestrator.execute(job: syncJob)
+
+        // Verify extra column was dropped
+        let vc = try await IntegrationTestConfig.connect(to: targetConfig)
+        let rows = try await vc.query(
+            PostgresQuery(unsafeSQL: "SELECT column_name FROM information_schema.columns WHERE table_schema = '\(Self.testSchema)' AND table_name = 'conflict_table' ORDER BY ordinal_position"),
+            logger: IntegrationTestConfig.logger
+        )
+        var columns: [String] = []
+        for try await row in rows {
+            columns.append(try row.decode(String.self))
+        }
+        #expect(!columns.contains("extra_col"))
+
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).conflict_table CASCADE", on: vc)
+        try? await vc.close()
+
+        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).conflict_table CASCADE", on: sc)
+        try? await sc.close()
+    }
+
+    // MARK: - Legacy behavior (no explicit conflict flags)
+
+    @Test("Sync without conflict flags uses legacy behavior (skip destructive)")
+    func legacyBehaviorSkipsDestructive() async throws {
+        let sourceConfig = try IntegrationTestConfig.sourceConfig()
+        let targetConfig = try IntegrationTestConfig.targetConfig()
+        let sourceConn = try await IntegrationTestConfig.connect(to: sourceConfig)
+        let targetConn = try await IntegrationTestConfig.connect(to: targetConfig)
+
+        try await Self.ensureTestSchema(on: sourceConn)
+        try await Self.ensureTestSchema(on: targetConn)
+        try await Self.cleanup(sourceConn: sourceConn, targetConn: targetConn)
+
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL
+            )
+        """, on: sourceConn)
+
+        try await IntegrationTestConfig.execute("""
+            CREATE TABLE \(Self.testSchema).conflict_table (
+                id integer PRIMARY KEY,
+                name text NOT NULL,
+                extra_col text
+            )
+        """, on: targetConn)
+
+        try? await sourceConn.close()
+        try? await targetConn.close()
+
+        let tableId = ObjectIdentifier(type: .table, schema: Self.testSchema, name: "conflict_table")
+        // No conflict flags — legacy behavior
+        let syncJob = SyncJob(
+            source: sourceConfig,
+            target: targetConfig,
+            objects: [ObjectSpec(id: tableId)],
+            dryRun: false,
+            force: true
+            // No conflictStrategy, no conflictResolutionExplicit
+        )
+
+        let orchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)
+        // Should succeed (skip destructive changes silently)
+        let output = try await orchestrator.execute(job: syncJob)
+        // No error thrown — legacy behavior preserved
+        #expect(!output.contains("error"))
+
+        // Verify extra column is still present (was skipped, not dropped)
+        let vc = try await IntegrationTestConfig.connect(to: targetConfig)
+        let rows = try await vc.query(
+            PostgresQuery(unsafeSQL: "SELECT column_name FROM information_schema.columns WHERE table_schema = '\(Self.testSchema)' AND table_name = 'conflict_table' ORDER BY ordinal_position"),
+            logger: IntegrationTestConfig.logger
+        )
+        var columns: [String] = []
+        for try await row in rows {
+            columns.append(try row.decode(String.self))
+        }
+        #expect(columns.contains("extra_col"))
+
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).conflict_table CASCADE", on: vc)
+        try? await vc.close()
+
+        let sc = try await IntegrationTestConfig.connect(to: sourceConfig)
+        try await IntegrationTestConfig.execute("DROP TABLE IF EXISTS \(Self.testSchema).conflict_table CASCADE", on: sc)
+        try? await sc.close()
+    }
+
     // MARK: - Skip strategy skips conflicts
 
     @Test("Sync with skip strategy skips conflicting objects")
@@ -422,7 +687,8 @@ struct ConflictResolutionIntegrationTests {
             objects: [ObjectSpec(id: tableId)],
             dryRun: false,
             force: true,
-            conflictStrategy: .skip
+            conflictStrategy: .skip,
+            conflictResolutionExplicit: true
         )
 
         let orchestrator = SyncOrchestrator(logger: IntegrationTestConfig.logger)

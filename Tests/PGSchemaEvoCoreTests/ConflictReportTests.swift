@@ -49,6 +49,25 @@ struct ConflictReportTests {
         #expect(text.contains("data loss risk"))
     }
 
+    @Test("Report renders IRREVERSIBLE marker and target SQL")
+    func reportRendersIrreversibleAndTargetSQL() {
+        let conflicts = [
+            SchemaConflict(
+                objectIdentifier: "enum:public.status",
+                kind: .irreversibleChange,
+                description: "Cannot remove enum value",
+                sourceSQL: [],
+                targetSQL: ["-- keep existing values"],
+                isIrreversible: true
+            )
+        ]
+        let report = ConflictReport(conflicts: conflicts)
+        let text = report.renderText()
+        #expect(text.contains("IRREVERSIBLE"))
+        #expect(text.contains("Target SQL:"))
+        #expect(text.contains("keep existing values"))
+    }
+
     @Test("Irreversible conflicts filtered correctly")
     func irreversibleFilter() {
         let conflicts = [

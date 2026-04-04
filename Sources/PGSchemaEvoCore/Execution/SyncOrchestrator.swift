@@ -43,10 +43,27 @@ public struct SyncOrchestrator: Sendable {
         let conflictDetector = ConflictDetector(logger: logger)
         var steps: [CloneStep] = []
 
-        // Determine effective conflict strategy (legacy --allow-drop-columns maps to sourceWins)
-        let effectiveStrategy = job.allowDropColumns && job.conflictStrategy == .fail
-            ? ConflictStrategy.sourceWins
-            : job.conflictStrategy
+        // Determine if conflict resolution is explicitly requested.
+        // When no conflict flags are set, use legacy behavior for backward compatibility:
+        // safe migrations always apply, destructive changes are skipped with a warning
+        // (unless --allow-drop-columns is set).
+        let conflictResolutionExplicit = job.conflictResolutionExplicit
+            || job.conflictFilePath != nil
+            || job.resolveFromPath != nil
+
+        // Determine effective conflict strategy:
+        // - Legacy --allow-drop-columns maps to sourceWins+force
+        // - No explicit conflict flags → use .skip (legacy: skip destructive with warning)
+        // - Explicit conflict flags → use as specified
+        let effectiveStrategy: ConflictStrategy
+        if job.allowDropColumns && !conflictResolutionExplicit {
+            effectiveStrategy = .sourceWins
+        } else if !conflictResolutionExplicit {
+            // Legacy behavior: skip destructive changes with a warning
+            effectiveStrategy = .skip
+        } else {
+            effectiveStrategy = job.conflictStrategy
+        }
         let effectiveForce = job.allowDropColumns || job.force
 
         do {
@@ -83,6 +100,13 @@ public struct SyncOrchestrator: Sendable {
 
                 // Build resolved SQL from conflict resolutions
                 let resolvedSQL = ConflictResolver.sqlForResolutions(resolutions, report: conflictReport)
+
+                // Log skipped conflicts (legacy warning behavior)
+                for resolution in resolutions where resolution.choice == .skip {
+                    if let conflict = conflictReport.conflicts.first(where: { $0.id == resolution.conflictId }) {
+                        logger.warning("Skipping conflict: \(conflict.description) (use --conflict-strategy source-wins --force to apply)")
+                    }
+                }
 
                 // Handle objects only in source (need to be created) — not conflicts
                 for id in diff.onlyInSource {
@@ -122,23 +146,19 @@ public struct SyncOrchestrator: Sendable {
                     steps.append(.rawSQL(sql: combinedResolved))
                 }
 
-                // Handle objects only in target via conflict resolution
-                // (objectOnlyInTarget conflicts already handled via resolutions)
-                let targetOnlyResolved = resolutions.filter { resolution in
-                    guard resolution.choice == .applySource else { return false }
-                    return conflictReport.conflicts.first { $0.id == resolution.conflictId }?.kind == .objectOnlyInTarget
-                }
+                // Handle objects only in target:
+                // - If conflict resolution approved dropping them, they're in resolvedSQL
+                // - If --drop-extra is set, drop remaining extra objects
                 if job.dropExtra {
-                    // Legacy behavior: drop all extra objects
-                    for id in diff.onlyInTarget {
-                        // Only drop if not already handled by conflict resolution
-                        let alreadyHandled = targetOnlyResolved.contains { res in
-                            conflictReport.conflicts.first { $0.id == res.conflictId }?.objectIdentifier == id.description
-                        }
-                        if !alreadyHandled {
-                            logger.info("Extra object to drop: \(id)")
-                            steps.append(.dropObject(id))
-                        }
+                    let resolvedDropIds = Set(resolutions
+                        .filter { $0.choice == .applySource }
+                        .compactMap { res in conflictReport.conflicts.first { $0.id == res.conflictId } }
+                        .filter { $0.kind == .objectOnlyInTarget }
+                        .map(\.objectIdentifier))
+
+                    for id in diff.onlyInTarget where !resolvedDropIds.contains(id.description) {
+                        logger.info("Extra object to drop: \(id)")
+                        steps.append(.dropObject(id))
                     }
                 }
 
@@ -198,6 +218,13 @@ public struct SyncOrchestrator: Sendable {
                 )
 
                 let resolvedSQL = ConflictResolver.sqlForResolutions(resolutions, report: conflictReport)
+
+                // Log skipped conflicts
+                for resolution in resolutions where resolution.choice == .skip {
+                    if let conflict = conflictReport.conflicts.first(where: { $0.id == resolution.conflictId }) {
+                        logger.warning("Skipping conflict: \(conflict.description) (use --conflict-strategy source-wins --force to apply)")
+                    }
+                }
 
                 // Create objects only in source
                 for id in onlyInSource {
@@ -304,8 +331,10 @@ public struct SyncOrchestrator: Sendable {
         // If --resolve-from is specified, load resolutions from file
         if let resolveFromPath = job.resolveFromPath {
             let fileResolutions = try ConflictFileIO.readResolutions(from: resolveFromPath)
+            let fileConflicts = try ConflictFileIO.readConflicts(from: resolveFromPath)
             let (matched, unresolved) = ConflictFileIO.matchResolutions(
                 fileResolutions: fileResolutions,
+                fileConflicts: fileConflicts,
                 report: report
             )
             if !unresolved.isEmpty {

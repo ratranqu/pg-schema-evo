@@ -155,6 +155,26 @@ struct ConflictResolverTests {
         #expect(sql[0] == "ALTER TABLE ...;")
     }
 
+    @Test("Interactive strategy fallback throws via resolve()")
+    func interactiveStrategyFallbackThrows() throws {
+        let resolver = ConflictResolver(strategy: .interactive, force: false, logger: .init(label: "test"))
+        let report = makeReport([makeConflict()])
+
+        #expect(throws: PGSchemaEvoError.self) {
+            try resolver.resolve(report: report)
+        }
+    }
+
+    @Test("Interactive resolveInteractive on empty report returns empty")
+    func interactiveEmptyReport() async throws {
+        let resolver = ConflictResolver(strategy: .interactive, force: false, logger: .init(label: "test"))
+        let report = makeReport([])
+        let prompter = MockConflictPrompter(choices: [])
+
+        let resolutions = try await resolver.resolveInteractive(report: report, prompter: prompter)
+        #expect(resolutions.isEmpty)
+    }
+
     @Test("sqlForResolutions returns empty for all keepTarget")
     func sqlForResolutionsEmpty() {
         let c1 = makeConflict()

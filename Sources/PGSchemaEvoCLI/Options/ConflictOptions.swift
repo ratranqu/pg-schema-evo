@@ -45,4 +45,9 @@ struct ConflictOptions: ParsableArguments {
 
         return .fail
     }
+
+    /// Whether any conflict-related option was explicitly specified by the user.
+    var isExplicit: Bool {
+        conflictStrategy != nil || ours || theirs || manual || conflictFile != nil || resolveFrom != nil
+    }
 }

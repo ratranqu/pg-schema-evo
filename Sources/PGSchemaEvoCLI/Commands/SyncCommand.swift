@@ -131,7 +131,8 @@ struct SyncCommand: AsyncParsableCommand {
             conflictStrategy: conflictStrategy,
             autoAcceptNonDestructive: conflict.yes,
             conflictFilePath: conflict.conflictFile,
-            resolveFromPath: conflict.resolveFrom
+            resolveFromPath: conflict.resolveFrom,
+            conflictResolutionExplicit: conflict.isExplicit
         )
 
         let orchestrator = SyncOrchestrator(logger: logger)
