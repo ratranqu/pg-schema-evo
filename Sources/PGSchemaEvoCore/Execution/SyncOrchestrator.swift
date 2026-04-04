@@ -40,7 +40,31 @@ public struct SyncOrchestrator: Sendable {
         let permissionSQLGen = PermissionSQLGenerator()
 
         let differ = SchemaDiffer(logger: logger)
+        let conflictDetector = ConflictDetector(logger: logger)
         var steps: [CloneStep] = []
+
+        // Determine if conflict resolution is explicitly requested.
+        // When no conflict flags are set, use legacy behavior for backward compatibility:
+        // safe migrations always apply, destructive changes are skipped with a warning
+        // (unless --allow-drop-columns is set).
+        let conflictResolutionExplicit = job.conflictResolutionExplicit
+            || job.conflictFilePath != nil
+            || job.resolveFromPath != nil
+
+        // Determine effective conflict strategy:
+        // - Legacy --allow-drop-columns maps to sourceWins+force
+        // - No explicit conflict flags → use .skip (legacy: skip destructive with warning)
+        // - Explicit conflict flags → use as specified
+        let effectiveStrategy: ConflictStrategy
+        if job.allowDropColumns && !conflictResolutionExplicit {
+            effectiveStrategy = .sourceWins
+        } else if !conflictResolutionExplicit {
+            // Legacy behavior: skip destructive changes with a warning
+            effectiveStrategy = .skip
+        } else {
+            effectiveStrategy = job.conflictStrategy
+        }
+        let effectiveForce = job.allowDropColumns || job.force
 
         do {
             if job.syncAll {
@@ -55,7 +79,36 @@ public struct SyncOrchestrator: Sendable {
                     types: requestedTypes
                 )
 
-                // Handle objects only in source (need to be created)
+                // Detect conflicts from the diff
+                let conflictReport = conflictDetector.detect(from: diff)
+
+                // Handle conflict file output (write and return)
+                if let conflictFilePath = job.conflictFilePath, !conflictReport.isEmpty {
+                    try ConflictFileIO.writeConflictFile(report: conflictReport, to: conflictFilePath)
+                    try? await sourceConn.close()
+                    try? await targetConn.close()
+                    return "Conflict report written to \(conflictFilePath) (\(conflictReport.count) conflict(s)). Edit the file and re-run with --resolve-from \(conflictFilePath)"
+                }
+
+                // Resolve conflicts
+                let resolutions = try await resolveConflicts(
+                    report: conflictReport,
+                    strategy: effectiveStrategy,
+                    force: effectiveForce,
+                    job: job
+                )
+
+                // Build resolved SQL from conflict resolutions
+                let resolvedSQL = ConflictResolver.sqlForResolutions(resolutions, report: conflictReport)
+
+                // Log skipped conflicts (legacy warning behavior)
+                for resolution in resolutions where resolution.choice == .skip {
+                    if let conflict = conflictReport.conflicts.first(where: { $0.id == resolution.conflictId }) {
+                        logger.warning("Skipping conflict: \(conflict.description) (use --conflict-strategy source-wins --force to apply)")
+                    }
+                }
+
+                // Handle objects only in source (need to be created) — not conflicts
                 for id in diff.onlyInSource {
                     logger.info("New object to create: \(id)")
                     if job.dropIfExists {
@@ -78,25 +131,32 @@ public struct SyncOrchestrator: Sendable {
                     steps.append(contentsOf: createSteps)
                 }
 
-                // Handle modified objects (need ALTER statements)
+                // Handle modified objects — safe migration SQL is always applied
                 for objDiff in diff.modified {
                     logger.info("Modified object: \(objDiff.id) (\(objDiff.differences.count) difference(s))")
                     let combinedSQL = objDiff.migrationSQL.joined(separator: "\n")
                     if !combinedSQL.isEmpty {
                         steps.append(.alterObject(sql: combinedSQL, id: objDiff.id))
                     }
-                    // Apply destructive changes only when allowed
-                    if job.allowDropColumns && !objDiff.dropColumnSQL.isEmpty {
-                        let dropSQL = objDiff.dropColumnSQL.joined(separator: "\n")
-                        steps.append(.alterObject(sql: dropSQL, id: objDiff.id))
-                    } else if !objDiff.dropColumnSQL.isEmpty {
-                        logger.warning("Skipping \(objDiff.dropColumnSQL.count) destructive change(s) for \(objDiff.id) (use --allow-drop-columns)")
-                    }
                 }
 
-                // Handle objects only in target (optionally drop)
+                // Add resolved conflict SQL (destructive changes that were approved)
+                if !resolvedSQL.isEmpty {
+                    let combinedResolved = resolvedSQL.joined(separator: "\n")
+                    steps.append(.rawSQL(sql: combinedResolved))
+                }
+
+                // Handle objects only in target:
+                // - If conflict resolution approved dropping them, they're in resolvedSQL
+                // - If --drop-extra is set, drop remaining extra objects
                 if job.dropExtra {
-                    for id in diff.onlyInTarget {
+                    let resolvedDropIds = Set(resolutions
+                        .filter { $0.choice == .applySource }
+                        .compactMap { res in conflictReport.conflicts.first { $0.id == res.conflictId } }
+                        .filter { $0.kind == .objectOnlyInTarget }
+                        .map(\.objectIdentifier))
+
+                    for id in diff.onlyInTarget where !resolvedDropIds.contains(id.description) {
                         logger.info("Extra object to drop: \(id)")
                         steps.append(.dropObject(id))
                     }
@@ -107,63 +167,113 @@ public struct SyncOrchestrator: Sendable {
                 // Targeted diff: only check the specific requested objects
                 let requestedIds = Set(job.objects.map(\.id))
 
+                // Collect individual diffs to build a SchemaDiff for conflict detection
+                var onlyInSource: [ObjectIdentifier] = []
+                var onlyInTarget: [ObjectIdentifier] = []
+                var modified: [ObjectDiff] = []
+                var matchCount = 0
+
                 for id in requestedIds {
                     let existsOnSource = await objectExists(id, on: sourceIntrospector)
                     let existsOnTarget = await objectExists(id, on: targetIntrospector)
 
                     switch (existsOnSource, existsOnTarget) {
                     case (true, false):
-                        // Object only in source — create on target
-                        logger.info("New object to create: \(id)")
-                        if job.dropIfExists {
-                            steps.append(.dropObject(id))
-                        }
-                        let createSteps = try await generateCreateSteps(
-                            for: id,
-                            sourceIntrospector: sourceIntrospector,
-                            pgDumpIntrospector: pgDumpIntrospector,
-                            tableSQLGen: tableSQLGen,
-                            viewSQLGen: viewSQLGen,
-                            seqSQLGen: seqSQLGen,
-                            enumSQLGen: enumSQLGen,
-                            funcSQLGen: funcSQLGen,
-                            schemaSQLGen: schemaSQLGen,
-                            compositeTypeSQLGen: compositeTypeSQLGen,
-                            permissionSQLGen: permissionSQLGen,
-                            job: job
-                        )
-                        steps.append(contentsOf: createSteps)
-
+                        onlyInSource.append(id)
                     case (true, true):
-                        // Object in both — compare for differences
                         if let objDiff = try await differ.compareObjects(id, source: sourceIntrospector, target: targetIntrospector) {
-                            logger.info("Modified object: \(objDiff.id) (\(objDiff.differences.count) difference(s))")
-                            let combinedSQL = objDiff.migrationSQL.joined(separator: "\n")
-                            if !combinedSQL.isEmpty {
-                                steps.append(.alterObject(sql: combinedSQL, id: objDiff.id))
-                            }
-                            if job.allowDropColumns && !objDiff.dropColumnSQL.isEmpty {
-                                let dropSQL = objDiff.dropColumnSQL.joined(separator: "\n")
-                                steps.append(.alterObject(sql: dropSQL, id: objDiff.id))
-                            } else if !objDiff.dropColumnSQL.isEmpty {
-                                logger.warning("Skipping \(objDiff.dropColumnSQL.count) destructive change(s) for \(objDiff.id) (use --allow-drop-columns)")
-                            }
+                            modified.append(objDiff)
+                        } else {
+                            matchCount += 1
                         }
-
                     case (false, true):
-                        // Object only in target — drop if requested
-                        if job.dropExtra {
-                            logger.info("Extra object to drop: \(id)")
-                            steps.append(.dropObject(id))
-                        }
-
+                        onlyInTarget.append(id)
                     case (false, false):
                         logger.warning("Object \(id) not found in source or target, skipping")
                     }
                 }
 
-                let newCount = steps.filter { if case .createObject = $0 { return true }; return false }.count
-                let modCount = steps.filter { if case .alterObject = $0 { return true }; return false }.count
+                let diff = SchemaDiff(
+                    onlyInSource: onlyInSource,
+                    onlyInTarget: onlyInTarget,
+                    modified: modified,
+                    matching: matchCount
+                )
+
+                // Detect and resolve conflicts
+                let conflictReport = conflictDetector.detect(from: diff)
+
+                if let conflictFilePath = job.conflictFilePath, !conflictReport.isEmpty {
+                    try ConflictFileIO.writeConflictFile(report: conflictReport, to: conflictFilePath)
+                    try? await sourceConn.close()
+                    try? await targetConn.close()
+                    return "Conflict report written to \(conflictFilePath) (\(conflictReport.count) conflict(s)). Edit the file and re-run with --resolve-from \(conflictFilePath)"
+                }
+
+                let resolutions = try await resolveConflicts(
+                    report: conflictReport,
+                    strategy: effectiveStrategy,
+                    force: effectiveForce,
+                    job: job
+                )
+
+                let resolvedSQL = ConflictResolver.sqlForResolutions(resolutions, report: conflictReport)
+
+                // Log skipped conflicts
+                for resolution in resolutions where resolution.choice == .skip {
+                    if let conflict = conflictReport.conflicts.first(where: { $0.id == resolution.conflictId }) {
+                        logger.warning("Skipping conflict: \(conflict.description) (use --conflict-strategy source-wins --force to apply)")
+                    }
+                }
+
+                // Create objects only in source
+                for id in onlyInSource {
+                    logger.info("New object to create: \(id)")
+                    if job.dropIfExists {
+                        steps.append(.dropObject(id))
+                    }
+                    let createSteps = try await generateCreateSteps(
+                        for: id,
+                        sourceIntrospector: sourceIntrospector,
+                        pgDumpIntrospector: pgDumpIntrospector,
+                        tableSQLGen: tableSQLGen,
+                        viewSQLGen: viewSQLGen,
+                        seqSQLGen: seqSQLGen,
+                        enumSQLGen: enumSQLGen,
+                        funcSQLGen: funcSQLGen,
+                        schemaSQLGen: schemaSQLGen,
+                        compositeTypeSQLGen: compositeTypeSQLGen,
+                        permissionSQLGen: permissionSQLGen,
+                        job: job
+                    )
+                    steps.append(contentsOf: createSteps)
+                }
+
+                // Apply safe migration SQL for modified objects
+                for objDiff in modified {
+                    logger.info("Modified object: \(objDiff.id) (\(objDiff.differences.count) difference(s))")
+                    let combinedSQL = objDiff.migrationSQL.joined(separator: "\n")
+                    if !combinedSQL.isEmpty {
+                        steps.append(.alterObject(sql: combinedSQL, id: objDiff.id))
+                    }
+                }
+
+                // Add resolved conflict SQL
+                if !resolvedSQL.isEmpty {
+                    let combinedResolved = resolvedSQL.joined(separator: "\n")
+                    steps.append(.rawSQL(sql: combinedResolved))
+                }
+
+                // Drop extra objects if requested (legacy behavior)
+                if job.dropExtra {
+                    for id in onlyInTarget {
+                        logger.info("Extra object to drop: \(id)")
+                        steps.append(.dropObject(id))
+                    }
+                }
+
+                let newCount = onlyInSource.count
+                let modCount = modified.count
                 logger.info("Sync summary: \(newCount) new, \(modCount) modified")
             }
 
@@ -207,6 +317,31 @@ public struct SyncOrchestrator: Sendable {
             try await executor.executeInTransaction(steps: steps, job: cloneJob)
             return ""
         }
+    }
+
+    /// Resolve conflicts using the configured strategy and job settings.
+    private func resolveConflicts(
+        report: ConflictReport,
+        strategy: ConflictStrategy,
+        force: Bool,
+        job: SyncJob
+    ) async throws -> [ConflictResolution] {
+        guard !report.isEmpty else { return [] }
+
+        if let resolveFromPath = job.resolveFromPath {
+            return try ConflictResolver.resolveFromFile(
+                path: resolveFromPath, report: report, strategy: strategy, logger: logger
+            )
+        }
+
+        let resolver = ConflictResolver(strategy: strategy, force: force, logger: logger)
+
+        if strategy == .interactive {
+            let prompter = TerminalConflictPrompter(autoAccept: job.autoAcceptNonDestructive)
+            return try await resolver.resolveInteractive(report: report, prompter: prompter)
+        }
+
+        return try resolver.resolve(report: report)
     }
 
     /// Generate CREATE steps for a new object (same logic as CloneOrchestrator).

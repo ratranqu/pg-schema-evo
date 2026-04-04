@@ -3,6 +3,10 @@ import Logging
 
 /// Coordinates the entire clone workflow: introspect, resolve dependencies,
 /// generate DDL, and either render a dry-run script or execute live via psql.
+///
+/// When target objects already exist, conflict resolution detects destructive
+/// differences and resolves them according to the configured strategy, applying
+/// only the delta SQL instead of dropping and recreating.
 public struct CloneOrchestrator: Sendable {
     private let logger: Logger
 
@@ -53,8 +57,29 @@ public struct CloneOrchestrator: Sendable {
         let compositeTypeSQLGen = CompositeTypeSQLGenerator()
         let permissionSQLGen = PermissionSQLGenerator()
 
+        // Conflict resolution setup
+        let conflictResolutionExplicit = job.conflictResolutionExplicit
+            || job.conflictFilePath != nil
+            || job.resolveFromPath != nil
+        let effectiveStrategy = conflictResolutionExplicit ? job.conflictStrategy : .skip
+        let differ = SchemaDiffer(logger: logger)
+        let conflictDetector = ConflictDetector(logger: logger)
+
+        // Connect to target for conflict detection when objects might already exist
+        let targetConn: PostgresConnection?
+        let targetIntrospector: PGCatalogIntrospector?
+        if !job.dropIfExists && conflictResolutionExplicit {
+            let conn = try await PostgresConnectionHelper.connect(config: job.target, logger: logger)
+            targetConn = conn
+            targetIntrospector = PGCatalogIntrospector(connection: conn, logger: logger)
+        } else {
+            targetConn = nil
+            targetIntrospector = nil
+        }
+
         var ddlSteps: [CloneStep] = []
         var dataTransfers: [DataTransferTask] = []
+        var conflictSQL: [String] = []
 
         do {
             // Resolve dependencies and determine clone order
@@ -70,8 +95,72 @@ public struct CloneOrchestrator: Sendable {
 
             logger.info("Clone order: \(orderedSpecs.map(\.id.description).joined(separator: ", "))")
 
+            // When conflict resolution is active, detect existing objects on target
+            // and build a combined diff for conflict detection
+            var existingOnTarget = Set<ObjectIdentifier>()
+            var objectDiffs: [ObjectDiff] = []
+
+            if let targetIntro = targetIntrospector {
+                for spec in orderedSpecs {
+                    let targetObjects = try await targetIntro.listObjects(schema: spec.id.schema, types: [spec.id.type])
+                    if targetObjects.contains(spec.id) {
+                        existingOnTarget.insert(spec.id)
+                        if let objDiff = try await differ.compareObjects(spec.id, source: introspector, target: targetIntro) {
+                            objectDiffs.append(objDiff)
+                        }
+                    }
+                }
+
+                if !objectDiffs.isEmpty || !existingOnTarget.isEmpty {
+                    let diff = SchemaDiff(
+                        onlyInSource: [],
+                        onlyInTarget: [],
+                        modified: objectDiffs,
+                        matching: existingOnTarget.count - objectDiffs.count
+                    )
+                    let conflictReport = conflictDetector.detect(from: diff)
+
+                    if let conflictFilePath = job.conflictFilePath, !conflictReport.isEmpty {
+                        try ConflictFileIO.writeConflictFile(report: conflictReport, to: conflictFilePath)
+                        await pool.close()
+                        try? await targetConn?.close()
+                        return "Conflict report written to \(conflictFilePath) (\(conflictReport.count) conflict(s)). Edit the file and re-run with --resolve-from \(conflictFilePath)"
+                    }
+
+                    let resolutions = try await resolveConflicts(
+                        report: conflictReport,
+                        strategy: effectiveStrategy,
+                        force: job.force,
+                        job: job
+                    )
+
+                    // Log skipped conflicts
+                    for resolution in resolutions where resolution.choice == .skip {
+                        if let conflict = conflictReport.conflicts.first(where: { $0.id == resolution.conflictId }) {
+                            logger.warning("Skipping conflict: \(conflict.description) (use --conflict-strategy source-wins --force to apply)")
+                        }
+                    }
+
+                    conflictSQL = ConflictResolver.sqlForResolutions(resolutions, report: conflictReport)
+                }
+            }
+
             for spec in orderedSpecs {
                 logger.info("Processing \(spec.id)")
+
+                // If object exists on target and conflict resolution is active,
+                // apply delta migration SQL instead of full CREATE
+                if existingOnTarget.contains(spec.id) {
+                    // Object exists on target — apply only schema delta (migration SQL)
+                    // instead of DROP+CREATE. Data is not re-copied for existing objects.
+                    if let objDiff = objectDiffs.first(where: { $0.id == spec.id }) {
+                        let migrationSQL = objDiff.migrationSQL.joined(separator: "\n")
+                        if !migrationSQL.isEmpty {
+                            ddlSteps.append(.alterObject(sql: migrationSQL, id: spec.id))
+                        }
+                    }
+                    continue
+                }
 
                 // Drop if exists
                 if job.dropIfExists {
@@ -279,12 +368,19 @@ public struct CloneOrchestrator: Sendable {
                     }
                 }
             }
+            // Add resolved conflict SQL (destructive changes that were approved)
+            if !conflictSQL.isEmpty {
+                let combinedResolved = conflictSQL.joined(separator: "\n")
+                ddlSteps.append(.rawSQL(sql: combinedResolved))
+            }
         } catch {
             await pool.close()
+            try? await targetConn?.close()
             throw error
         }
 
         await pool.close()
+        try? await targetConn?.close()
 
         if job.dryRun {
             let progress = ProgressReporter(totalSteps: ddlSteps.count + dataTransfers.count)
@@ -405,6 +501,31 @@ public struct CloneOrchestrator: Sendable {
             guard let size else { return .copy }
             return size >= threshold ? .pgDump : .copy
         }
+    }
+
+    /// Resolve conflicts using the configured strategy and job settings.
+    private func resolveConflicts(
+        report: ConflictReport,
+        strategy: ConflictStrategy,
+        force: Bool,
+        job: CloneJob
+    ) async throws -> [ConflictResolution] {
+        guard !report.isEmpty else { return [] }
+
+        if let resolveFromPath = job.resolveFromPath {
+            return try ConflictResolver.resolveFromFile(
+                path: resolveFromPath, report: report, strategy: strategy, logger: logger
+            )
+        }
+
+        let resolver = ConflictResolver(strategy: strategy, force: force, logger: logger)
+
+        if strategy == .interactive {
+            let prompter = TerminalConflictPrompter(autoAccept: job.autoAcceptNonDestructive)
+            return try await resolver.resolveInteractive(report: report, prompter: prompter)
+        }
+
+        return try resolver.resolve(report: report)
     }
 }
 

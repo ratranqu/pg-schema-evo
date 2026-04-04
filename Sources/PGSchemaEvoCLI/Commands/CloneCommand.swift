@@ -25,11 +25,14 @@ struct CloneCommand: AsyncParsableCommand {
     @OptionGroup var target: TargetConnectionOptions
     @OptionGroup var objects: ObjectSpecOptions
     @OptionGroup var transfer: TransferOptions
+    @OptionGroup var conflict: ConflictOptions
 
     func run() async throws {
         // Configure logging
         var logger = Logger(label: "pg-schema-evo")
         logger.logLevel = transfer.verbose ? .debug : .info
+
+        let conflictStrategy = try conflict.resolvedStrategy()
 
         // Parse WHERE clauses into a map
         var whereMap: [String: String] = [:]
@@ -104,7 +107,12 @@ struct CloneCommand: AsyncParsableCommand {
                 retries: transfer.retries,
                 skipPreflight: transfer.skipPreflight,
                 globalRowLimit: transfer.rowLimit,
-                parallel: transfer.parallel
+                parallel: transfer.parallel,
+                conflictStrategy: conflictStrategy,
+                autoAcceptNonDestructive: conflict.yes,
+                conflictFilePath: conflict.conflictFile,
+                resolveFromPath: conflict.resolveFrom,
+                conflictResolutionExplicit: conflict.isExplicit
             )
         } else {
             // Parse from CLI args only
@@ -151,7 +159,12 @@ struct CloneCommand: AsyncParsableCommand {
                 retries: transfer.retries,
                 skipPreflight: transfer.skipPreflight,
                 globalRowLimit: transfer.rowLimit,
-                parallel: transfer.parallel
+                parallel: transfer.parallel,
+                conflictStrategy: conflictStrategy,
+                autoAcceptNonDestructive: conflict.yes,
+                conflictFilePath: conflict.conflictFile,
+                resolveFromPath: conflict.resolveFrom,
+                conflictResolutionExplicit: conflict.isExplicit
             )
         }
 

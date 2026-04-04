@@ -37,6 +37,11 @@ PGSchemaEvoCore/
                     ShellRunner (subprocess), PreflightChecker,
                     ProgressReporter (ANSI terminal output),
                     SignalHandler (graceful SIGINT/SIGTERM with rollback)
+  Conflict/       — ConflictDetector (classifies SchemaDiff into typed conflicts),
+                    ConflictResolver (applies strategies: fail, source-wins, target-wins,
+                    interactive, skip), ConflictPrompter (interactive Y/N prompts),
+                    ConflictFileIO (JSON conflict file read/write for offline review),
+                    SchemaConflict, ConflictStrategy, ConflictResolution, ConflictReport
   Config/         — ConfigLoader (YAML parsing with env var interpolation),
                     DataSyncStateStore (YAML state persistence for data-sync)
   Diff/           — SchemaDiffer (compare objects between two databases,
@@ -92,6 +97,9 @@ RLS policies can be optionally cloned (`--rls` flag or `rls: true` in YAML). The
 ### Connection pooling
 `PostgresConnectionPool` manages a fixed-size pool of PostgresNIO connections for parallel introspection. `ParallelDataTransfer` uses dependency-aware scheduling to stream COPY data concurrently across multiple connections.
 
+### Conflict resolution
+`ConflictDetector` transforms `SchemaDiff` output into typed `SchemaConflict` entries, classifying each as destructive/non-destructive/irreversible. `ConflictResolver` applies one of five strategies (fail, source-wins, target-wins, interactive, skip). All destructive actions halt by default unless `--force` is used. Interactive mode prompts per conflict with `--yes` for auto-accept. Offline review is supported via JSON conflict files (`--conflict-file` to generate, `--resolve-from` to apply). Integrated into both `SyncOrchestrator` and `CloneOrchestrator`.
+
 ## Workflows
 
 ### Clone Flow
@@ -146,12 +154,12 @@ RLS policies can be optionally cloned (`--rls` flag or `rls: true` in YAML). The
 | 8 | Incremental data sync (`data-sync` command) — timestamp/ID-based change detection, UPSERT via temp tables, optional delete detection, YAML state file |
 | 9 | Performance — connection pooling, parallel data transfer with dependency-aware scheduling, streaming COPY (no temp files), batched introspection queries, configurable `--parallel` concurrency with auto-detect |
 | 10 | Schema migration (`migrate` command) — generate, apply, rollback, status subcommands; paired YAML metadata + SQL files with UP/DOWN/CUSTOM/DATA sections; reverse SQL generation; checksum verification; migration tracking table (`_pg_schema_evo_migrations`) |
+| 11 | Conflict resolution ��� structured conflict detection from `SchemaDiff`, 5 resolution strategies (fail, source-wins, target-wins, interactive, skip), destructive action safety gating (`--force`), JSON conflict files for offline review, integrated into `sync` and `clone` commands |
 
 ### Future Work
 
 | Area | Description |
 |------|-------------|
-| Conflict resolution | Interactive merge when target has diverged from source |
 | Observability | Structured JSON logging, OpenTelemetry traces for clone operations |
 | Scheduled sync | Watch for schema changes and auto-sync on a schedule or continuously |
 | Multi-schema/multi-database | Batch operations across multiple schemas and databases |
