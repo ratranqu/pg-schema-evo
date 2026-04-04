@@ -215,7 +215,10 @@ public struct LiveExecutor: Sendable {
             let copyCommand: String
             if whereClause != nil || rowLimit != nil {
                 var query = "SELECT * FROM \(id.qualifiedName)"
-                if let wh = whereClause { query += " WHERE \(wh)" }
+                if let wh = whereClause {
+                    try Self.validateWhereClause(wh)
+                    query += " WHERE \(wh)"
+                }
                 if let lim = rowLimit { query += " LIMIT \(lim)" }
                 copyCommand = "\\copy (\(query)) TO STDOUT WITH (FORMAT csv, HEADER)"
             } else {
@@ -410,7 +413,10 @@ public struct LiveExecutor: Sendable {
         let copySource: String
         if whereClause != nil || rowLimit != nil {
             var query = "SELECT * FROM \(id.qualifiedName)"
-            if let wh = whereClause { query += " WHERE \(wh)" }
+            if let wh = whereClause {
+                try Self.validateWhereClause(wh)
+                query += " WHERE \(wh)"
+            }
             if let lim = rowLimit { query += " LIMIT \(lim)" }
             copySource = "\\copy (\(query)) TO STDOUT WITH (FORMAT csv, HEADER)"
         } else {
@@ -553,5 +559,23 @@ public struct LiveExecutor: Sendable {
 
     private func quoteIdent(_ ident: String) -> String {
         "\"\(ident.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+
+    /// Validate a WHERE clause to prevent accidental SQL injection or misuse.
+    /// Rejects clauses containing semicolons, SQL comments, or multiple statements.
+    static func validateWhereClause(_ clause: String) throws {
+        let trimmed = clause.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            throw PGSchemaEvoError.invalidObjectSpec("WHERE clause cannot be empty")
+        }
+        if trimmed.contains(";") {
+            throw PGSchemaEvoError.invalidObjectSpec("WHERE clause must not contain semicolons")
+        }
+        if trimmed.contains("--") {
+            throw PGSchemaEvoError.invalidObjectSpec("WHERE clause must not contain SQL comments (--)")
+        }
+        if trimmed.contains("/*") {
+            throw PGSchemaEvoError.invalidObjectSpec("WHERE clause must not contain block comments (/*)")
+        }
     }
 }

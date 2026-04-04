@@ -31,6 +31,13 @@ public struct PreflightChecker: Sendable {
             failures.append("Cannot connect to target: \(error.localizedDescription)")
         }
 
+        // Validate object specs
+        for spec in job.objects {
+            if let validationError = Self.validateObjectSpec(spec.id) {
+                failures.append(validationError)
+            }
+        }
+
         // If we can't connect, skip further checks
         guard failures.isEmpty else { return failures }
 
@@ -121,11 +128,40 @@ public struct PreflightChecker: Sendable {
             case .extension:
                 _ = try await introspector.describeExtension(id)
             default:
-                return true // Skip verification for exotic types
+                // Aggregates, operators, FDWs, foreign tables: skip verification
+                // as they use pg_dump for introspection
+                return true
             }
             return true
-        } catch is PGSchemaEvoError {
-            return false
+        } catch let error as PGSchemaEvoError {
+            if case .objectNotFound = error {
+                return false
+            }
+            // Re-throw unexpected errors (connection failures, etc.)
+            throw error
         }
+    }
+
+    /// Validate an object spec has required fields.
+    static func validateObjectSpec(_ id: ObjectIdentifier) -> String? {
+        switch id.type {
+        case .table, .view, .materializedView, .sequence, .enum, .compositeType,
+             .function, .procedure, .foreignTable, .aggregate:
+            if id.schema == nil {
+                return "Object \(id) requires a schema qualifier"
+            }
+        case .role, .extension, .foreignDataWrapper:
+            break // schema not required
+        case .schema:
+            break
+        case .operator:
+            if id.schema == nil {
+                return "Object \(id) requires a schema qualifier"
+            }
+        }
+        if id.name.isEmpty {
+            return "Object name cannot be empty"
+        }
+        return nil
     }
 }

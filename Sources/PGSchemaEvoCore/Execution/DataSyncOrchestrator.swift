@@ -20,13 +20,13 @@ public struct DataSyncOrchestrator: Sendable {
             config: job.source,
             logger: logger
         )
+        defer { Task { try? await sourceConn.close() } }
 
         let introspector = PGCatalogIntrospector(connection: sourceConn, logger: logger)
         let shell = ShellRunner()
         let sqlGen = UpsertSQLGenerator()
 
         guard let psqlPath = shell.which("psql") else {
-            try? await sourceConn.close()
             throw PGSchemaEvoError.shellCommandFailed(
                 command: "psql", exitCode: -1,
                 stderr: "psql not found in PATH. Install postgresql-client."
@@ -79,11 +79,8 @@ public struct DataSyncOrchestrator: Sendable {
                 logger.info("Table \(tableKey): tracking '\(trackingColumn)', initial value = \(maxValue)")
             }
         } catch {
-            try? await sourceConn.close()
             throw error
         }
-
-        try? await sourceConn.close()
 
         // Save state file
         let stateStore = DataSyncStateStore()
@@ -185,7 +182,7 @@ public struct DataSyncOrchestrator: Sendable {
                     continue
                 }
 
-                let rowCount = lineCount - 1  // subtract header
+                let rowCount = max(lineCount - 1, 0)  // subtract header, guard against negative
 
                 // Fetch all source PKs for delete detection if requested
                 var deletePKData: String?
@@ -255,9 +252,11 @@ public struct DataSyncOrchestrator: Sendable {
                                 column: tableState.column,
                                 lastValue: newMax
                             )
-                            // Persist state after each successful table sync
-                            try stateStore.save(state: state, path: job.stateFilePath)
+                        } else {
+                            logger.warning("Empty MAX value for \(tableKey), keeping previous state")
                         }
+                    } else {
+                        logger.warning("Failed to query MAX(\(tableState.column)) for \(tableKey): \(maxResult.stderr). State not updated for this table.")
                     }
 
                     summary.append("\(tableKey): \(rowCount) row(s) synced")
@@ -271,6 +270,11 @@ public struct DataSyncOrchestrator: Sendable {
         }
 
         try? await sourceConn.close()
+
+        // Persist state atomically after all tables are synced
+        if !job.dryRun {
+            try stateStore.save(state: state, path: job.stateFilePath)
+        }
 
         if summary.isEmpty {
             return "No tables to sync."
