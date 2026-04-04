@@ -137,8 +137,13 @@ public struct PreflightChecker: Sendable {
             if case .objectNotFound = error {
                 return false
             }
-            // Re-throw unexpected errors (connection failures, etc.)
-            throw error
+            // Other PGSchemaEvoError variants (e.g. introspectionFailed) — object likely doesn't exist
+            logger.debug("Unexpected error verifying \(id): \(error.localizedDescription)")
+            return false
+        } catch {
+            // Non-PGSchemaEvoError (e.g. PostgresNIO errors) — can't determine existence
+            logger.debug("Unexpected error verifying \(id): \(error.localizedDescription)")
+            return false
         }
     }
 
