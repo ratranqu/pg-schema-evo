@@ -49,6 +49,12 @@ public enum PGSchemaEvoError: Error, LocalizedError, Sendable {
     case migrationHasIrreversibleChanges(id: String, changes: [String])
     case migrationDirectoryNotFound(path: String)
 
+    // Conflict Resolution
+    case conflictsDetected(count: Int, destructive: Int)
+    case destructiveActionBlocked(descriptions: [String])
+    case conflictFileParseError(path: String, underlying: String)
+    case conflictResolutionMismatch(conflictId: String)
+
     public var errorDescription: String? {
         switch self {
         case .connectionFailed(let endpoint, let underlying):
@@ -105,6 +111,14 @@ public enum PGSchemaEvoError: Error, LocalizedError, Sendable {
             "Migration '\(id)' contains irreversible changes:\n\(changes.map { "  - \($0)" }.joined(separator: "\n"))"
         case .migrationDirectoryNotFound(let path):
             "Migration directory not found: \(path)"
+        case .conflictsDetected(let count, let destructive):
+            "\(count) conflict(s) detected (\(destructive) destructive). Use --conflict-strategy to choose a resolution or --conflict-file to review offline."
+        case .destructiveActionBlocked(let descriptions):
+            "Destructive change(s) blocked (use --force to allow):\n\(descriptions.map { "  - \($0)" }.joined(separator: "\n"))"
+        case .conflictFileParseError(let path, let underlying):
+            "Failed to parse conflict file '\(path)': \(underlying)"
+        case .conflictResolutionMismatch(let conflictId):
+            "Conflict resolution mismatch: conflict '\(conflictId)' not found in current diff"
         }
     }
 }

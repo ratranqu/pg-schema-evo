@@ -12,6 +12,7 @@ public struct SyncJob: Sendable {
     /// Allow dropping columns, constraints, indexes, triggers, and policies that exist
     /// in the target but not in the source. Without this flag, destructive per-object
     /// changes are reported but not applied.
+    /// Deprecated: use `conflictStrategy: .sourceWins` with `force: true` instead.
     public let allowDropColumns: Bool
     /// Skip interactive confirmation prompt.
     public let force: Bool
@@ -21,6 +22,14 @@ public struct SyncJob: Sendable {
     public let syncAll: Bool
     /// Maximum retry attempts for transient errors.
     public let retries: Int
+    /// Strategy for resolving schema conflicts (default: .fail).
+    public let conflictStrategy: ConflictStrategy
+    /// Auto-accept non-destructive resolutions in interactive mode (--yes).
+    public let autoAcceptNonDestructive: Bool
+    /// Path to write conflict report for offline review (--conflict-file).
+    public let conflictFilePath: String?
+    /// Path to read resolutions from a previously generated conflict file (--resolve-from).
+    public let resolveFromPath: String?
 
     public init(
         source: ConnectionConfig,
@@ -33,7 +42,11 @@ public struct SyncJob: Sendable {
         force: Bool = false,
         skipPreflight: Bool = false,
         syncAll: Bool = false,
-        retries: Int = 3
+        retries: Int = 3,
+        conflictStrategy: ConflictStrategy = .fail,
+        autoAcceptNonDestructive: Bool = false,
+        conflictFilePath: String? = nil,
+        resolveFromPath: String? = nil
     ) {
         self.source = source
         self.target = target
@@ -46,6 +59,10 @@ public struct SyncJob: Sendable {
         self.skipPreflight = skipPreflight
         self.syncAll = syncAll
         self.retries = retries
+        self.conflictStrategy = conflictStrategy
+        self.autoAcceptNonDestructive = autoAcceptNonDestructive
+        self.conflictFilePath = conflictFilePath
+        self.resolveFromPath = resolveFromPath
     }
 
     /// Convert to a CloneJob for compatibility with ScriptRenderer and LiveExecutor.
@@ -58,7 +75,11 @@ public struct SyncJob: Sendable {
             dropIfExists: dropIfExists,
             force: force,
             retries: retries,
-            skipPreflight: skipPreflight
+            skipPreflight: skipPreflight,
+            conflictStrategy: conflictStrategy,
+            autoAcceptNonDestructive: autoAcceptNonDestructive,
+            conflictFilePath: conflictFilePath,
+            resolveFromPath: resolveFromPath
         )
     }
 }

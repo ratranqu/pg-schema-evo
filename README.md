@@ -215,4 +215,4 @@ llvm-cov report \
 
 ## Status
 
-Version 0.5.0 — Schema migration and migration tracking: full `migrate` CLI command with `generate`, `apply`, `rollback`, and `status` subcommands. Migrations stored as paired YAML metadata + plain SQL files with UP/DOWN/CUSTOM/DATA sections. Reverse SQL generation for all object types. Checksum verification with force-apply option. Migration tracking via configurable PostgreSQL table. Irreversible change detection. Comprehensive test coverage at 90%+ with 1008 tests across 83 suites.
+Version 0.6.0 — Conflict resolution: structured conflict detection from `SchemaDiff` with 5 resolution strategies (`fail`, `source-wins`, `target-wins`, `interactive`, `skip`). All destructive actions halt by default unless `--force` is used. Interactive per-conflict prompts with `--yes` for auto-accept. JSON conflict files for offline review (`--conflict-file` / `--resolve-from`). Integrated into both `sync` and `clone` commands via `--conflict-strategy`, `--ours`, `--theirs`, `--manual` flags.

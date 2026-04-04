@@ -26,6 +26,7 @@ struct SyncCommand: AsyncParsableCommand {
 
     @OptionGroup var source: SourceConnectionOptions
     @OptionGroup var target: TargetConnectionOptions
+    @OptionGroup var conflict: ConflictOptions
 
     @Option(name: .long, help: "Object to sync (format: type:schema.name, repeatable)")
     var object: [String] = []
@@ -113,6 +114,8 @@ struct SyncCommand: AsyncParsableCommand {
             throw ValidationError("Provide at least one --object or use --sync-all with --type")
         }
 
+        let conflictStrategy = try conflict.resolvedStrategy()
+
         let job = SyncJob(
             source: sourceConfig,
             target: targetConfig,
@@ -124,7 +127,11 @@ struct SyncCommand: AsyncParsableCommand {
             force: force,
             skipPreflight: skipPreflight,
             syncAll: syncAll,
-            retries: retries
+            retries: retries,
+            conflictStrategy: conflictStrategy,
+            autoAcceptNonDestructive: conflict.yes,
+            conflictFilePath: conflict.conflictFile,
+            resolveFromPath: conflict.resolveFrom
         )
 
         let orchestrator = SyncOrchestrator(logger: logger)

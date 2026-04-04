@@ -117,6 +117,10 @@ public struct ScriptRenderer: Sendable {
         case .attachPartition(let sql, let id):
             section += sectionHeader(number, "Attach partition: \(id)")
             section += wrapInPsql(sql, target: "$TARGET_DSN")
+
+        case .rawSQL(let sql):
+            section += sectionHeader(number, "Execute resolved conflict SQL")
+            section += wrapInPsql(sql, target: "$TARGET_DSN")
         }
 
         return section
@@ -212,4 +216,5 @@ public enum CloneStep: Sendable {
     case refreshMaterializedView(ObjectIdentifier)
     case enableRLS(sql: String, id: ObjectIdentifier)
     case attachPartition(sql: String, id: ObjectIdentifier)
+    case rawSQL(sql: String)
 }

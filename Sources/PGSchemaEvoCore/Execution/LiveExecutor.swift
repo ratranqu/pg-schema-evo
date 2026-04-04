@@ -193,6 +193,9 @@ public struct LiveExecutor: Sendable {
 
             case .attachPartition(let sql, _):
                 script += sql + "\n\n"
+
+            case .rawSQL(let sql):
+                script += sql + "\n\n"
             }
         }
 
@@ -367,6 +370,15 @@ public struct LiveExecutor: Sendable {
                 sql: sql,
                 env: env,
                 description: "ATTACH PARTITION \(id)"
+            )
+
+        case .rawSQL(let sql):
+            try await executePsql(
+                psqlPath: psqlPath,
+                dsn: targetDSN,
+                sql: sql,
+                env: env,
+                description: "Execute resolved conflict SQL"
             )
         }
     }
@@ -548,6 +560,7 @@ public struct LiveExecutor: Sendable {
         case .refreshMaterializedView(let id): "Refresh materialized view \(id)"
         case .enableRLS(_, let id): "Enable RLS on \(id)"
         case .attachPartition(_, let id): "Attach partition \(id)"
+        case .rawSQL: "Execute resolved conflict SQL"
         }
     }
 

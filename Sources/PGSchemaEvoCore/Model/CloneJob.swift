@@ -18,6 +18,14 @@ public struct CloneJob: Sendable {
     public let globalRowLimit: Int?
     /// Maximum parallel data transfers. 0 = auto-detect, 1 = sequential.
     public let parallel: Int
+    /// Strategy for resolving schema conflicts (default: .fail).
+    public let conflictStrategy: ConflictStrategy
+    /// Auto-accept non-destructive resolutions in interactive mode (--yes).
+    public let autoAcceptNonDestructive: Bool
+    /// Path to write conflict report for offline review (--conflict-file).
+    public let conflictFilePath: String?
+    /// Path to read resolutions from a previously generated conflict file (--resolve-from).
+    public let resolveFromPath: String?
 
     /// Default threshold: 100 MB.
     public static let defaultDataSizeThreshold = 100 * 1024 * 1024
@@ -34,7 +42,11 @@ public struct CloneJob: Sendable {
         retries: Int = 3,
         skipPreflight: Bool = false,
         globalRowLimit: Int? = nil,
-        parallel: Int = 0
+        parallel: Int = 0,
+        conflictStrategy: ConflictStrategy = .fail,
+        autoAcceptNonDestructive: Bool = false,
+        conflictFilePath: String? = nil,
+        resolveFromPath: String? = nil
     ) {
         self.source = source
         self.target = target
@@ -48,5 +60,9 @@ public struct CloneJob: Sendable {
         self.skipPreflight = skipPreflight
         self.globalRowLimit = globalRowLimit
         self.parallel = parallel
+        self.conflictStrategy = conflictStrategy
+        self.autoAcceptNonDestructive = autoAcceptNonDestructive
+        self.conflictFilePath = conflictFilePath
+        self.resolveFromPath = resolveFromPath
     }
 }
